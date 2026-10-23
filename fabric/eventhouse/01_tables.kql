@@ -1,0 +1,128 @@
+// matchlab Eventhouse: tables and ingestion mappings.
+// Run in a KQL queryset against the match database, one command at a time
+// (management commands start with a dot and cannot be batched in one query).
+
+// ---------------------------------------------------------------- the live stream
+
+.create-merge table MatchEvents (
+    match_id: string,
+    event_id: long,
+    period: int,
+    clock_s: real,
+    ts: datetime,
+    team_id: string,
+    player_id: string,
+    type: string,
+    subtype: string,
+    x: real,
+    y: real,
+    end_x: real,
+    end_y: real,
+    outcome: string,
+    under_pressure: bool,
+    pass_length_m: real,
+    pass_difficulty: real,
+    ball_speed_mps: real,
+    xg: real,
+    possession_id: string,
+    phase: string,
+    related_event_id: long,
+    score_home: int,
+    score_away: int,
+    detail: dynamic
+)
+
+// Column names match the JSON property names, so Eventstream's Eventhouse destination can
+// map by name. This explicit mapping is for direct ingestion and for the "Get data" wizard.
+.create-or-alter table MatchEvents ingestion json mapping 'MatchEventsMapping'
+'['
+'  {"column":"match_id","path":"$.match_id"},'
+'  {"column":"event_id","path":"$.event_id"},'
+'  {"column":"period","path":"$.period"},'
+'  {"column":"clock_s","path":"$.clock_s"},'
+'  {"column":"ts","path":"$.ts"},'
+'  {"column":"team_id","path":"$.team_id"},'
+'  {"column":"player_id","path":"$.player_id"},'
+'  {"column":"type","path":"$.type"},'
+'  {"column":"subtype","path":"$.subtype"},'
+'  {"column":"x","path":"$.x"},'
+'  {"column":"y","path":"$.y"},'
+'  {"column":"end_x","path":"$.end_x"},'
+'  {"column":"end_y","path":"$.end_y"},'
+'  {"column":"outcome","path":"$.outcome"},'
+'  {"column":"under_pressure","path":"$.under_pressure"},'
+'  {"column":"pass_length_m","path":"$.pass_length_m"},'
+'  {"column":"pass_difficulty","path":"$.pass_difficulty"},'
+'  {"column":"ball_speed_mps","path":"$.ball_speed_mps"},'
+'  {"column":"xg","path":"$.xg"},'
+'  {"column":"possession_id","path":"$.possession_id"},'
+'  {"column":"phase","path":"$.phase"},'
+'  {"column":"related_event_id","path":"$.related_event_id"},'
+'  {"column":"score_home","path":"$.score_home"},'
+'  {"column":"score_away","path":"$.score_away"},'
+'  {"column":"detail","path":"$.detail"}'
+']'
+
+// Low-latency arrival for live play.
+.alter table MatchEvents policy streamingingestion enable
+
+// A demo database does not need long retention; raise this for a season archive.
+.alter table MatchEvents policy retention softdelete = 90d
+
+// ---------------------------------------------------------------- reference data (from `matchlab export`)
+
+.create-merge table Teams (
+    team_id: string, name: string, short_name: string, rating: real, possession: real,
+    press_height: real, direct: real, formation: string, stadium: string, league_seed: int
+)
+
+.create-merge table Players (
+    team_id: string, player_id: string, name: string, shirt: int, role: string, x: real, y: real,
+    passing: real, shooting: real, pressing: real, pace: real, stamina: real, starter: bool
+)
+
+.create-merge table Matches (
+    match_id: string, seed: long, league_seed: int, kickoff: datetime, venue: string,
+    home_team_id: string, home_name: string, home_short: string, home_formation: string,
+    away_team_id: string, away_name: string, away_short: string, away_formation: string
+)
+
+.create-merge table Lineups (
+    match_id: string, side: string, team_id: string, player_id: string, name: string, shirt: int,
+    role: string, x: real, y: real, starter: bool
+)
+
+// ---------------------------------------------------------------- Otherwise and Undertow outputs
+
+// One row per fork: the decision, the alternatives, and the gap. Produced by the fork service.
+.create-merge table ForkRecords (
+    match_id: string, event_id: long, period: int, clock_s: real, minute: int, side: string,
+    team_id: string, player_id: string, player_name: string, x: real, y: real, under_pressure: bool,
+    score: dynamic, rollouts: int, horizon_events: int, taken: dynamic, best_untaken: dynamic,
+    regret: real, candidates: dynamic, actual_event: dynamic
+)
+
+// One row per assumption per check: the pre-match ledger Undertow audits live.
+.create-merge table LedgerRows (
+    match_id: string, assumption_id: string, team_id: string, metric: string, minute: int,
+    expected: real, band_low: real, band_high: real, observed: real, status: string,
+    broke_at: int, cause: string, evidence_event_ids: dynamic, confidence: real, ts: datetime
+)
+
+// Timed overlay cues, mirrored from Cosmos DB for analysis.
+.create-merge table Cues (
+    cue_id: string, match_id: string, t_start_s: real, duration_s: real, layer: string,
+    geometry: dynamic, text: dynamic, priority: int, modes: dynamic, source: string, ts: datetime
+)
+
+// ---------------------------------------------------------------- hidden truth (optional in Eventhouse)
+// The truth files belong in the Lakehouse for training. Loading them here as well lets you score
+// Undertow's detections with a KQL join. Never route them into the live stream.
+
+.create-merge table TruthMinutes (
+    match_id: string, minute: int, team_id: string, momentum: real, fatigue: real, press_intent: real, risk_appetite: real
+)
+
+.create-merge table TruthChanges (
+    match_id: string, minute: int, team_id: string, cause: string, variable: string, delta: real, detail: string
+)

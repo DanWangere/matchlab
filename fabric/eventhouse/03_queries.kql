@@ -1,0 +1,90 @@
+// matchlab Eventhouse: queries for the studio desk (Real-Time Dashboard tiles) and for checking
+// the pipeline. Replace the match id with one you streamed. Each block is one query.
+
+// ---------------------------------------------------------------- checks after the first stream
+
+// Rows arriving? Latest event per match.
+MatchEvents
+| summarize events = count(), last_event = max(event_id), last_clock = max(clock_s), last_seen = max(ingestion_time()) by match_id
+| order by last_seen desc
+
+// Ingestion latency: wall clock of the event versus when Eventhouse got it (use --live-ts when streaming).
+MatchEvents
+| where match_id == "RAV-IRO-1000"
+| extend latency_s = datetime_diff("millisecond", ingestion_time(), ts) / 1000.0
+| summarize p50 = percentile(latency_s, 50), p95 = percentile(latency_s, 95), max = max(latency_s)
+
+// Every stored function runs?
+MatchState("RAV-IRO-1000")
+
+// ---------------------------------------------------------------- ticker and live state
+
+LiveStats("RAV-IRO-1000")
+
+// Last 20 events, newest first: the raw feed tile.
+MatchEvents
+| where match_id == "RAV-IRO-1000"
+| join kind=leftouter (Players | project player_id, name) on player_id
+| project event_id, minute = toint(clock_s / 60) + 1, team_id, name, type, subtype, outcome, xg, pass_difficulty, ball_speed_mps, under_pressure
+| top 20 by event_id desc
+
+// ---------------------------------------------------------------- momentum, rhythm, pressure
+
+// Momentum line: positive is the home side.
+Momentum("RAV-IRO-1000")
+| project minute, momentum
+| render linechart
+
+// Pressure made per team per five minutes.
+TeamWindows("RAV-IRO-1000", 300.0)
+| project minute, team_id, pressures_made
+| render columnchart with (kind = unstacked)
+
+// Control versus chaos per five minutes.
+ControlChaos("RAV-IRO-1000", 300.0)
+| project minute, control, turnovers_per_min, state
+
+// Where a team wins the ball back (higher x = higher press), per ten minutes.
+TeamWindows("RAV-IRO-1000", 600.0)
+| project minute, team_id, avg_recovery_x
+| render linechart
+
+// Did the pressing drop? Anomalies in a team's pressures per minute.
+FeatureShifts("RAV-IRO-1000", "t19", "pressures_made", 1.5)
+
+// ---------------------------------------------------------------- the brief's features
+
+PassQuality("RAV-IRO-1000") | top 10 by hard_passes_completed desc
+SpeedMetrics("RAV-IRO-1000") | top 5 by fastest_shot_kmh desc
+PlayerThresholds("RAV-IRO-1000", 400.0, 25.0) | where distance_flag or speed_flag
+KeyMoments("RAV-IRO-1000") | top 8 by importance desc
+
+// ---------------------------------------------------------------- threat
+
+// The league's threat map as a heatmap (needs a few matches ingested to be smooth).
+ThreatGrid()
+| project cx, cy, p_goal
+| evaluate pivot(cx, sum(p_goal))
+
+// Who moved the ball into danger.
+PlayerValue("RAV-IRO-1000") | top 10 by threat_added desc
+
+// The ten most valuable single moves of the match.
+MoveValue("RAV-IRO-1000")
+| join kind=leftouter (Players | project player_id, name) on player_id
+| top 10 by move_value desc
+| project event_id, clock_s, team_id, name, type, subtype, pass_difficulty, threat_start, threat_end, move_value
+
+// ---------------------------------------------------------------- Activator starting points
+
+// A rule can watch this: fires when a team's momentum stays below -0.5 for two consecutive minutes.
+Momentum("RAV-IRO-1000")
+| where momentum < -0.5
+| serialize
+| extend prev_momentum = prev(momentum, 1)
+| where prev_momentum < -0.5
+| top 1 by minute desc
+
+// Or this: a big chance (xG at least 0.3) in the last minute of play.
+MatchEvents
+| where type == "shot" and xg >= 0.3 and ingestion_time() > ago(1m)

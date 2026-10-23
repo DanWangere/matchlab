@@ -1,0 +1,290 @@
+// matchlab Eventhouse: stored functions for match state.
+// Run each .create-or-alter function command on its own. After that they are callable from any
+// query, a Real-Time Dashboard, Activator, or a Fabric data agent: e.g. `MatchState("RAV-IRO-1000")`.
+//
+// Frame reminder: x, y are in the acting team's attack frame (towards x = 105). Comparing a
+// team's own events against each other is always safe; comparing two teams' positions directly
+// needs one side flipped (105 - x, 68 - y).
+
+// ---------------------------------------------------------------- where the match is now
+
+.create-or-alter function with (folder = "match", docstring = "Latest score, clock, phase and possession for one match")
+MatchState(mid: string) {
+    let last = MatchEvents | where match_id == mid | summarize arg_max(event_id, *);
+    let poss = MatchEvents
+        | where match_id == mid and type == "possession_change"
+        | summarize arg_max(event_id, team_id)
+        | project team_id;
+    last
+    | join kind=leftouter (Matches | project match_id, home_name, away_name, home_team_id, away_team_id) on match_id
+    | extend minute = toint(clock_s / 60) + 1, possession_team = toscalar(poss)
+    | project match_id, event_id, period, clock_s, minute, score_home, score_away, home_team_id, home_name,
+              away_team_id, away_name, possession_team, phase, last_type = type, last_team = team_id, ts
+}
+
+// ---------------------------------------------------------------- possessions
+
+.create-or-alter function with (folder = "match", docstring = "One row per possession: who had it, how long, what it produced, how it ended")
+PossessionChains(mid: string) {
+    MatchEvents
+    | where match_id == mid and isnotempty(possession_id)
+    | summarize
+        (first_event, team_id) = arg_min(event_id, team_id),
+        (last_event, end_type, end_outcome) = arg_max(event_id, type, outcome),
+        start_clock = min(clock_s), end_clock = max(clock_s), period = min(period),
+        events = count(),
+        passes = countif(type == "pass"),
+        passes_completed = countif(type == "pass" and outcome == "complete"),
+        carries = countif(type == "carry"),
+        shots = countif(type == "shot"),
+        xg = round(sumif(xg, type == "shot"), 3),
+        goals = countif(type == "shot" and outcome == "goal"),
+        pressures_faced = countif(type == "pressure"),
+        max_x = max(end_x),
+        start_x = min(x)
+      by match_id, possession_id
+    | extend duration_s = round(end_clock - start_clock, 1),
+             reached_final_third = max_x >= 70,
+             pass_completion = iff(passes > 0, round(todouble(passes_completed) / passes, 3), real(null))
+    | order by first_event asc
+}
+
+.create-or-alter function with (folder = "match", docstring = "Per-team totals for a ticker: possession share, passes, shots, xG, pressures")
+LiveStats(mid: string) {
+    let chains = PossessionChains(mid);
+    let total = toscalar(chains | summarize sum(duration_s));
+    let per_team = chains
+        | summarize possession_s = sum(duration_s), possessions = count(),
+                    passes = sum(passes), passes_completed = sum(passes_completed),
+                    shots = sum(shots), xg = round(sum(xg), 2), goals = sum(goals),
+                    final_third_entries = countif(reached_final_third)
+          by team_id
+        | extend possession_share = round(possession_s / total, 3),
+                 pass_completion = iff(passes > 0, round(todouble(passes_completed) / passes, 3), real(null));
+    let pressing = MatchEvents
+        | where match_id == mid and type == "pressure"
+        | summarize pressures_made = count(), high_presses = countif(subtype == "high_press") by team_id;
+    let on_target = MatchEvents
+        | where match_id == mid and type == "shot"
+        | summarize on_target = countif(outcome in ("goal", "saved")) by team_id;
+    per_team
+    | join kind=leftouter pressing on team_id
+    | join kind=leftouter on_target on team_id
+    | join kind=leftouter (Teams | project team_id, name, short_name) on team_id
+    | project team_id, name, short_name, possession_share, possessions, passes, pass_completion, shots, on_target,
+              xg, goals, final_third_entries, pressures_made, high_presses
+}
+
+// ---------------------------------------------------------------- threat: learned from the league itself
+
+.create-or-alter function with (folder = "model", docstring = "12x8 grid: how often a possession that moves the ball through a cell ends in a shot or a goal. Learned from the synthetic league, not imported.")
+ThreatGrid() {
+    let moves = MatchEvents
+        | where type in ("pass", "carry") and isnotempty(possession_id) and isnotnull(end_x)
+        | extend cx = min_of(toint(end_x / 8.75), 11), cy = min_of(toint(end_y / 8.5), 7)
+        | project match_id, possession_id, cx, cy;
+    let outcomes = MatchEvents
+        | where isnotempty(possession_id)
+        | summarize shots = countif(type == "shot"), goals = countif(type == "shot" and outcome == "goal") by match_id, possession_id
+        | extend shot = shots > 0, goal = goals > 0;
+    moves
+    | join kind=inner outcomes on match_id, possession_id
+    | summarize n = count(), p_shot = round(avg(iff(shot, 1.0, 0.0)), 4), p_goal = round(avg(iff(goal, 1.0, 0.0)), 4) by cx, cy
+    | order by cy asc, cx asc
+}
+
+.create-or-alter function with (folder = "model", docstring = "Threat gained or lost by each pass and carry, from ThreatGrid")
+MoveValue(mid: string) {
+    let grid = ThreatGrid();
+    MatchEvents
+    | where match_id == mid and type in ("pass", "carry") and isnotnull(end_x)
+    | extend cx = min_of(toint(x / 8.75), 11), cy = min_of(toint(y / 8.5), 7),
+             ex = min_of(toint(end_x / 8.75), 11), ey = min_of(toint(end_y / 8.5), 7)
+    | join kind=leftouter (grid | project cx, cy, threat_start = p_goal) on cx, cy
+    | join kind=leftouter (grid | project ex = cx, ey = cy, threat_end = p_goal) on ex, ey
+    | extend threat_start = coalesce(threat_start, 0.0), threat_end = coalesce(threat_end, 0.0)
+    | extend move_value = round(iff(outcome == "complete", threat_end - threat_start, -threat_start), 4)
+    | project match_id, event_id, clock_s, team_id, player_id, type, subtype, outcome, under_pressure,
+              x, y, end_x, end_y, pass_difficulty, threat_start, threat_end, move_value
+}
+
+.create-or-alter function with (folder = "model", docstring = "Per-player value: threat added by passes and carries, plus xG from shots")
+PlayerValue(mid: string) {
+    let mv = MoveValue(mid) | summarize threat_added = round(sum(move_value), 3), moves = count() by team_id, player_id;
+    let sh = MatchEvents | where match_id == mid and type == "shot" | summarize shots = count(), xg = round(sum(xg), 3), goals = countif(outcome == "goal") by team_id, player_id;
+    mv
+    | join kind=fullouter sh on team_id, player_id
+    | extend team_id = coalesce(team_id, team_id1), player_id = coalesce(player_id, player_id1)
+    | join kind=leftouter (Players | project player_id, name, shirt, role) on player_id
+    | project team_id, player_id, name, shirt, role, moves, threat_added, shots = coalesce(shots, 0), xg = coalesce(xg, 0.0), goals = coalesce(goals, 0)
+    | order by threat_added desc
+}
+
+// ---------------------------------------------------------------- the brief's suggested features
+
+.create-or-alter function with (folder = "features", docstring = "Pass quality per player: volume, completion, length, situational difficulty, hard passes completed")
+PassQuality(mid: string) {
+    MatchEvents
+    | where match_id == mid and type == "pass"
+    | summarize passes = count(),
+                passes_completed = countif(outcome == "complete"),
+                avg_length_m = round(avg(pass_length_m), 1),
+                longest_m = round(max(pass_length_m), 1),
+                avg_difficulty = round(avg(pass_difficulty), 3),
+                hard_passes = countif(pass_difficulty >= 0.5),
+                hard_passes_completed = countif(pass_difficulty >= 0.5 and outcome == "complete"),
+                under_pressure = countif(under_pressure),
+                under_pressure_completed = countif(under_pressure and outcome == "complete")
+      by team_id, player_id
+    | extend completion = round(todouble(passes_completed) / passes, 3),
+             hard_completion = iff(hard_passes > 0, round(todouble(hard_passes_completed) / hard_passes, 3), real(null)),
+             pressure_completion = iff(under_pressure > 0, round(todouble(under_pressure_completed) / under_pressure, 3), real(null))
+    | join kind=leftouter (Players | project player_id, name, shirt, role) on player_id
+    | project team_id, player_id, name, shirt, role, passes, completion, avg_length_m, longest_m, avg_difficulty,
+              hard_passes, hard_completion, under_pressure, pressure_completion
+    | order by passes desc
+}
+
+.create-or-alter function with (folder = "features", docstring = "Ball speed per player: fastest shot, fastest pass, averages (m/s and km/h)")
+SpeedMetrics(mid: string) {
+    MatchEvents
+    | where match_id == mid and isnotnull(ball_speed_mps) and type in ("pass", "shot")
+    | summarize fastest_shot_mps = maxif(ball_speed_mps, type == "shot"),
+                avg_shot_mps = avgif(ball_speed_mps, type == "shot"),
+                fastest_pass_mps = maxif(ball_speed_mps, type == "pass"),
+                shots = countif(type == "shot"), passes = countif(type == "pass")
+      by team_id, player_id
+    | join kind=leftouter (Players | project player_id, name, shirt, role) on player_id
+    | project team_id, player_id, name, shirt, role, shots, passes,
+              fastest_shot_mps = round(fastest_shot_mps, 1), fastest_shot_kmh = round(fastest_shot_mps * 3.6, 1),
+              avg_shot_kmh = round(avg_shot_mps * 3.6, 1), fastest_pass_kmh = round(fastest_pass_mps * 3.6, 1)
+    | order by fastest_shot_mps desc
+}
+
+.create-or-alter function with (folder = "features", docstring = "Player tagging with threshold flags: carry distance and top ball speed. Event data has no player tracking, so distance is ball-carrying distance.")
+PlayerThresholds(mid: string, distance_m: real, speed_mps: real) {
+    MatchEvents
+    | where match_id == mid and isnotempty(player_id)
+    | extend carry_m = iff(type == "carry" and isnotnull(end_x), sqrt(pow(end_x - x, 2) + pow(end_y - y, 2)), 0.0)
+    | summarize touches = countif(type in ("pass", "carry", "shot", "clearance")),
+                carry_distance_m = round(sum(carry_m), 1),
+                top_ball_speed_mps = max(ball_speed_mps),
+                last_event = max(event_id)
+      by team_id, player_id
+    | join kind=leftouter (Players | project player_id, name, shirt, role) on player_id
+    | extend distance_flag = carry_distance_m >= distance_m, speed_flag = top_ball_speed_mps >= speed_mps,
+             top_ball_speed_kmh = round(top_ball_speed_mps * 3.6, 1)
+    | project team_id, player_id, name, shirt, role, touches, carry_distance_m, top_ball_speed_kmh, distance_flag, speed_flag, last_event
+    | order by carry_distance_m desc
+}
+
+.create-or-alter function with (folder = "features", docstring = "The name tag for one event: who, shirt, role, what they did")
+PlayerTag(mid: string, eid: long) {
+    MatchEvents
+    | where match_id == mid and event_id == eid
+    | join kind=leftouter (Players | project player_id, name, shirt, role) on player_id
+    | join kind=leftouter (Teams | project team_id, short_name) on team_id
+    | project match_id, event_id, clock_s, team_id, short_name, player_id, name, shirt, role, type, subtype, outcome,
+              x, y, end_x, end_y, pass_length_m, pass_difficulty, ball_speed_mps, xg
+}
+
+// ---------------------------------------------------------------- rhythm, pressure, momentum
+
+.create-or-alter function with (folder = "state", docstring = "Per-team features per time window (window_s seconds): the inputs for pressure, momentum and Undertow's estimator")
+TeamWindows(mid: string, window_s: real) {
+    MatchEvents
+    | where match_id == mid and type != "period_end"
+    | extend w = toint(clock_s / window_s),
+             carry_m = iff(type == "carry" and isnotnull(end_x), sqrt(pow(end_x - x, 2) + pow(end_y - y, 2)), 0.0),
+             cause = tostring(detail.cause)
+    | summarize passes = countif(type == "pass"),
+                passes_completed = countif(type == "pass" and outcome == "complete"),
+                avg_pass_risk = round(avgif(pass_difficulty, type == "pass"), 3),
+                avg_pass_length = round(avgif(pass_length_m, type == "pass"), 1),
+                long_balls = countif(type == "pass" and subtype in ("long", "through", "switch")),
+                pressures_made = countif(type == "pressure"),
+                high_presses = countif(type == "pressure" and subtype == "high_press"),
+                recoveries = countif(type == "possession_change" and cause in ("interception", "recovery", "tackle")),
+                avg_recovery_x = round(avgif(x, type == "possession_change" and cause in ("interception", "recovery", "tackle")), 1),
+                shots = countif(type == "shot"),
+                xg = round(sumif(xg, type == "shot"), 3),
+                final_third_entries = countif(type in ("pass", "carry") and outcome == "complete" and x < 70 and end_x >= 70),
+                carry_distance_m = round(sum(carry_m), 1),
+                fouls = countif(type == "foul"),
+                clearances = countif(type == "clearance")
+      by team_id, w
+    | extend window_start_s = w * window_s, minute = toint(w * window_s / 60),
+             pass_completion = iff(passes > 0, round(todouble(passes_completed) / passes, 3), real(null)),
+             long_ball_share = iff(passes > 0, round(todouble(long_balls) / passes, 3), real(null))
+    | order by w asc, team_id asc
+}
+
+.create-or-alter function with (folder = "state", docstring = "Minute-by-minute momentum, positive = home. A five-minute rolling mean of the threat swing (xG, shots, final-third entries).")
+Momentum(mid: string) {
+    let home = toscalar(Matches | where match_id == mid | project home_team_id);
+    let away = toscalar(Matches | where match_id == mid | project away_team_id);
+    TeamWindows(mid, 60.0)
+    | extend threat = 2.0 * xg + 0.25 * shots + 0.08 * final_third_entries
+    | summarize home_threat = round(sumif(threat, team_id == home), 3), away_threat = round(sumif(threat, team_id == away), 3) by minute = w
+    | order by minute asc
+    | extend swing = home_threat - away_threat
+    | extend momentum = round((swing + coalesce(prev(swing, 1), 0.0) + coalesce(prev(swing, 2), 0.0)
+                               + coalesce(prev(swing, 3), 0.0) + coalesce(prev(swing, 4), 0.0)) / 5.0, 3)
+    | project minute, home_threat, away_threat, swing, momentum
+}
+
+.create-or-alter function with (folder = "state", docstring = "Game rhythm per window: control (long, settled possessions) versus chaos (fast turnovers)")
+ControlChaos(mid: string, window_s: real) {
+    PossessionChains(mid)
+    | extend w = toint(start_clock / window_s)
+    | summarize possessions = count(),
+                avg_events = round(avg(events), 2),
+                avg_duration_s = round(avg(duration_s), 1),
+                long_chains = countif(passes >= 5),
+                shots = sum(shots),
+                pass_completion = round(todouble(sum(passes_completed)) / max_of(sum(passes), 1), 3)
+      by w
+    | extend window_start_s = w * window_s, minute = toint(w * window_s / 60),
+             turnovers_per_min = round(possessions / (window_s / 60.0), 2),
+             control = round(min_of(1.0, 0.6 * (avg_events / 10.0) + 0.4 * (todouble(long_chains) / possessions)), 3)
+    | extend state = case(control >= 0.45, "control", control <= 0.2, "chaos", "contested")
+    | order by w asc
+}
+
+.create-or-alter function with (folder = "state", docstring = "Goals, big chances, penalties, cards and substitutions, ranked by importance")
+KeyMoments(mid: string) {
+    MatchEvents
+    | where match_id == mid
+    | where (type == "shot" and (outcome == "goal" or xg >= 0.25 or subtype == "penalty")) or type in ("card", "substitution")
+    | extend importance = case(type == "shot" and outcome == "goal", 1.0,
+                               type == "shot" and subtype == "penalty", 0.8,
+                               type == "shot", xg,
+                               type == "card", 0.4,
+                               0.3)
+    | join kind=leftouter (Players | project player_id, name, shirt) on player_id
+    | project event_id, period, clock_s, minute = toint(clock_s / 60) + 1, team_id, player_id, name, shirt, type, subtype,
+              outcome, xg, importance, score_home, score_away, detail
+    | order by importance desc, event_id asc
+}
+
+.create-or-alter function with (folder = "state", docstring = "Shift detection on one team feature per minute via series_decompose_anomalies. feature: pass_completion, avg_pass_risk, long_ball_share, pressures_made, high_presses, recoveries, avg_recovery_x, xg, final_third_entries, carry_distance_m; anything else means passes. threshold 1.5 is a sensible start.")
+FeatureShifts(mid: string, team: string, feature: string, threshold: real) {
+    TeamWindows(mid, 60.0)
+    | where team_id == team
+    | extend value = case(feature == "pass_completion", pass_completion,
+                          feature == "avg_pass_risk", avg_pass_risk,
+                          feature == "long_ball_share", long_ball_share,
+                          feature == "pressures_made", todouble(pressures_made),
+                          feature == "high_presses", todouble(high_presses),
+                          feature == "recoveries", todouble(recoveries),
+                          feature == "avg_recovery_x", avg_recovery_x,
+                          feature == "xg", xg,
+                          feature == "final_third_entries", todouble(final_third_entries),
+                          feature == "carry_distance_m", carry_distance_m,
+                          todouble(passes))
+    | make-series v = avg(value) default = 0.0 on minute from 0 to 100 step 1
+    | extend (anomalies, scores, baseline) = series_decompose_anomalies(v, threshold, -1, 'linefit')
+    | mv-expand minute to typeof(long), v to typeof(double), anomalies to typeof(int), scores to typeof(double), baseline to typeof(double)
+    | where anomalies != 0
+    | project minute, value = round(v, 3), baseline = round(baseline, 3), direction = iff(anomalies > 0, "up", "down"), score = round(scores, 2)
+}

@@ -16,6 +16,7 @@ All clubs, players and matches are fictional. No real match data is included or 
 | Hidden ground truth: momentum, fatigue, press intent, risk appetite per team per minute, plus every instruction change and its cause | `data/truth/<id>.truth.json` | never | Undertow training and scoring |
 | Fork record: the decision taken, the alternatives, their rollout values | `matchlab fork --out` | later, as cues | Otherwise |
 | JSON schema for the event | `data/event.schema.json` | | Eventhouse table definition |
+| Flat reference and truth files | `data/export/*.jsonl` (`matchlab export`) | | Eventhouse reference tables, Lakehouse |
 
 Coordinates are metres on a 105 x 68 pitch, always in the acting team's attack frame
 (towards x = 105). A renderer flips the away team's events.
@@ -29,6 +30,7 @@ matchlab generate --matches 20 --seed 1                    # matches + truth int
 matchlab stats data/matches/RAV-IRO-1000                   # one match's numbers
 matchlab stream data/matches/RAV-IRO-1000 --speed 20       # replay to stdout at 20x
 matchlab fork data/matches/RAV-IRO-1000 --rollouts 200     # price the biggest chance's alternatives
+matchlab export                                            # flat JSONL for Eventhouse and Lakehouse
 python -m pytest
 ```
 
@@ -105,9 +107,11 @@ there; the real data stays out of the repo.
 ## Where this fits, and what comes next
 
 1. **This package.** Generator, schema, stream, fork demo. Done.
-2. **Fabric.** Eventstream custom-endpoint source fed by `matchlab stream`; Eventhouse tables
-   for events, metadata and fork records; KQL for match state (possession chains, xT grid,
-   pass quality, speed metrics); Lakehouse for the generated league and the truth files.
+2. **Fabric.** Scripts and the setup guide are in [`fabric/`](fabric/README.md): Eventstream
+   custom-endpoint source fed by `matchlab stream`; Eventhouse tables for events, reference data,
+   fork records, ledger rows and cues; KQL functions for match state (possession chains, a threat
+   grid learned from the league, pass quality, speed metrics, windowed team features, momentum,
+   control versus chaos); Lakehouse for the truth files.
 3. **Cue contract and renderer.** Timed, machine-readable overlay cues in Cosmos DB, pushed
    by Web PubSub to a 2D pitch renderer with viewer modes and language switches.
 4. **Otherwise.** The fork service around `fork.py`: fork-worthiness rules, a possession-value

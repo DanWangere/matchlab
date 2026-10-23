@@ -169,3 +169,23 @@ def test_substitutions_keep_eleven_on_the_pitch(match):
         ts = sim.ts(side)
         assert len(ts.on_pitch) == 11 and len(ts.slots) == 11
         assert set(ts.on_pitch) == set(ts.slots)
+
+
+def test_export_flattens_everything(tmp_path, league):
+    import os
+    from matchlab.export import export_all
+    data = tmp_path / "data"
+    (data / "matches").mkdir(parents=True)
+    (data / "truth").mkdir()
+    (data / "league.json").write_text(league.to_json())
+    sim = Simulator(league, "t01", "t02", 5)
+    events = sim.run()
+    (data / "matches" / f"{sim.match_id}.meta.json").write_text(json.dumps(sim.metadata()))
+    (data / "truth" / f"{sim.match_id}.truth.json").write_text(sim.truth.to_json())
+    counts = export_all(str(data), str(tmp_path / "out"))
+    assert counts["teams"] == 20 and counts["players"] == 360
+    assert counts["matches"] == 1 and counts["lineups"] == 36
+    assert counts["truth_minutes"] == len(sim.truth.minutes)
+    assert counts["truth_schedules"] == 2 * 101
+    row = json.loads((tmp_path / "out" / "matches.jsonl").read_text().splitlines()[0])
+    assert row["home_team_id"] == "t01" and row["away_team_id"] == "t02"
