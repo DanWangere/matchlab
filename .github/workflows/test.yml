@@ -1,0 +1,13 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest -q
+      - run: matchlab league && matchlab generate --matches 2 && matchlab fork data/matches/$(ls data/matches | head -1 | sed 's/\.events\.jsonl//;s/\.meta\.json//') --rollouts 20
