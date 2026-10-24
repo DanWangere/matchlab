@@ -14,9 +14,10 @@ What's in this folder:
 | `eventhouse/03_queries.kql` | Pipeline checks, dashboard tiles, Activator starting points |
 | `scripts/ingest_reference.py` | Optional: queued ingestion of the exported reference files |
 
-The KQL was written without a live database to run it against. Run the checks in
-`03_queries.kql` after each script; the two places most likely to need a touch are the
-`arg_min`/`arg_max` tuple naming in `PossessionChains` and `make-series` in `FeatureShifts`.
+Both scripts have been run against a live Eventhouse. Two things learned on the way, already
+reflected in the files: the retention policy takes a JSON document, and `let` statements inside a
+stored function body fail to parse in the queryset editor, so the functions use inline subqueries
+and `toscalar` instead.
 
 ## 1. Eventhouse
 

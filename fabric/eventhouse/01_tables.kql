@@ -34,40 +34,13 @@
 
 // Column names match the JSON property names, so Eventstream's Eventhouse destination can
 // map by name. This explicit mapping is for direct ingestion and for the "Get data" wizard.
-.create-or-alter table MatchEvents ingestion json mapping 'MatchEventsMapping'
-'['
-'  {"column":"match_id","path":"$.match_id"},'
-'  {"column":"event_id","path":"$.event_id"},'
-'  {"column":"period","path":"$.period"},'
-'  {"column":"clock_s","path":"$.clock_s"},'
-'  {"column":"ts","path":"$.ts"},'
-'  {"column":"team_id","path":"$.team_id"},'
-'  {"column":"player_id","path":"$.player_id"},'
-'  {"column":"type","path":"$.type"},'
-'  {"column":"subtype","path":"$.subtype"},'
-'  {"column":"x","path":"$.x"},'
-'  {"column":"y","path":"$.y"},'
-'  {"column":"end_x","path":"$.end_x"},'
-'  {"column":"end_y","path":"$.end_y"},'
-'  {"column":"outcome","path":"$.outcome"},'
-'  {"column":"under_pressure","path":"$.under_pressure"},'
-'  {"column":"pass_length_m","path":"$.pass_length_m"},'
-'  {"column":"pass_difficulty","path":"$.pass_difficulty"},'
-'  {"column":"ball_speed_mps","path":"$.ball_speed_mps"},'
-'  {"column":"xg","path":"$.xg"},'
-'  {"column":"possession_id","path":"$.possession_id"},'
-'  {"column":"phase","path":"$.phase"},'
-'  {"column":"related_event_id","path":"$.related_event_id"},'
-'  {"column":"score_home","path":"$.score_home"},'
-'  {"column":"score_away","path":"$.score_away"},'
-'  {"column":"detail","path":"$.detail"}'
-']'
+.create-or-alter table MatchEvents ingestion json mapping 'MatchEventsMapping' '[{"column":"match_id","path":"$.match_id"},{"column":"event_id","path":"$.event_id"},{"column":"period","path":"$.period"},{"column":"clock_s","path":"$.clock_s"},{"column":"ts","path":"$.ts"},{"column":"team_id","path":"$.team_id"},{"column":"player_id","path":"$.player_id"},{"column":"type","path":"$.type"},{"column":"subtype","path":"$.subtype"},{"column":"x","path":"$.x"},{"column":"y","path":"$.y"},{"column":"end_x","path":"$.end_x"},{"column":"end_y","path":"$.end_y"},{"column":"outcome","path":"$.outcome"},{"column":"under_pressure","path":"$.under_pressure"},{"column":"pass_length_m","path":"$.pass_length_m"},{"column":"pass_difficulty","path":"$.pass_difficulty"},{"column":"ball_speed_mps","path":"$.ball_speed_mps"},{"column":"xg","path":"$.xg"},{"column":"possession_id","path":"$.possession_id"},{"column":"phase","path":"$.phase"},{"column":"related_event_id","path":"$.related_event_id"},{"column":"score_home","path":"$.score_home"},{"column":"score_away","path":"$.score_away"},{"column":"detail","path":"$.detail"}]'
 
 // Low-latency arrival for live play.
 .alter table MatchEvents policy streamingingestion enable
 
 // A demo database does not need long retention; raise this for a season archive.
-.alter table MatchEvents policy retention softdelete = 90d
+.alter table MatchEvents policy retention '{"SoftDeletePeriod": "90.00:00:00", "Recoverability": "Enabled"}'
 
 // ---------------------------------------------------------------- reference data (from `matchlab export`)
 

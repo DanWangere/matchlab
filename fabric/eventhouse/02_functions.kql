@@ -10,14 +10,12 @@
 
 .create-or-alter function with (folder = "match", docstring = "Latest score, clock, phase and possession for one match")
 MatchState(mid: string) {
-    let last = MatchEvents | where match_id == mid | summarize arg_max(event_id, *);
-    let poss = MatchEvents
-        | where match_id == mid and type == "possession_change"
-        | summarize arg_max(event_id, team_id)
-        | project team_id;
-    last
+    MatchEvents
+    | where match_id == mid
+    | summarize arg_max(event_id, *)
     | join kind=leftouter (Matches | project match_id, home_name, away_name, home_team_id, away_team_id) on match_id
-    | extend minute = toint(clock_s / 60) + 1, possession_team = toscalar(poss)
+    | extend minute = toint(clock_s / 60) + 1,
+             possession_team = toscalar(MatchEvents | where match_id == mid and type == "possession_change" | summarize arg_max(event_id, team_id) | project team_id)
     | project match_id, event_id, period, clock_s, minute, score_home, score_away, home_team_id, home_name,
               away_team_id, away_name, possession_team, phase, last_type = type, last_team = team_id, ts
 }
@@ -51,25 +49,18 @@ PossessionChains(mid: string) {
 
 .create-or-alter function with (folder = "match", docstring = "Per-team totals for a ticker: possession share, passes, shots, xG, pressures")
 LiveStats(mid: string) {
-    let chains = PossessionChains(mid);
-    let total = toscalar(chains | summarize sum(duration_s));
-    let per_team = chains
-        | summarize possession_s = sum(duration_s), possessions = count(),
-                    passes = sum(passes), passes_completed = sum(passes_completed),
-                    shots = sum(shots), xg = round(sum(xg), 2), goals = sum(goals),
-                    final_third_entries = countif(reached_final_third)
-          by team_id
-        | extend possession_share = round(possession_s / total, 3),
-                 pass_completion = iff(passes > 0, round(todouble(passes_completed) / passes, 3), real(null));
-    let pressing = MatchEvents
-        | where match_id == mid and type == "pressure"
-        | summarize pressures_made = count(), high_presses = countif(subtype == "high_press") by team_id;
-    let on_target = MatchEvents
-        | where match_id == mid and type == "shot"
-        | summarize on_target = countif(outcome in ("goal", "saved")) by team_id;
-    per_team
-    | join kind=leftouter pressing on team_id
-    | join kind=leftouter on_target on team_id
+    PossessionChains(mid)
+    | summarize possession_s = sum(duration_s), possessions = count(),
+                passes = sum(passes), passes_completed = sum(passes_completed),
+                shots = sum(shots), xg = round(sum(xg), 2), goals = sum(goals),
+                final_third_entries = countif(reached_final_third)
+      by team_id
+    | extend possession_share = round(possession_s / toscalar(PossessionChains(mid) | summarize sum(duration_s)), 3),
+             pass_completion = iff(passes > 0, round(todouble(passes_completed) / passes, 3), real(null))
+    | join kind=leftouter (MatchEvents | where match_id == mid and type == "pressure"
+                           | summarize pressures_made = count(), high_presses = countif(subtype == "high_press") by team_id) on team_id
+    | join kind=leftouter (MatchEvents | where match_id == mid and type == "shot"
+                           | summarize on_target = countif(outcome in ("goal", "saved")) by team_id) on team_id
     | join kind=leftouter (Teams | project team_id, name, short_name) on team_id
     | project team_id, name, short_name, possession_share, possessions, passes, pass_completion, shots, on_target,
               xg, goals, final_third_entries, pressures_made, high_presses
@@ -79,29 +70,26 @@ LiveStats(mid: string) {
 
 .create-or-alter function with (folder = "model", docstring = "12x8 grid: how often a possession that moves the ball through a cell ends in a shot or a goal. Learned from the synthetic league, not imported.")
 ThreatGrid() {
-    let moves = MatchEvents
-        | where type in ("pass", "carry") and isnotempty(possession_id) and isnotnull(end_x)
-        | extend cx = min_of(toint(end_x / 8.75), 11), cy = min_of(toint(end_y / 8.5), 7)
-        | project match_id, possession_id, cx, cy;
-    let outcomes = MatchEvents
-        | where isnotempty(possession_id)
-        | summarize shots = countif(type == "shot"), goals = countif(type == "shot" and outcome == "goal") by match_id, possession_id
-        | extend shot = shots > 0, goal = goals > 0;
-    moves
-    | join kind=inner outcomes on match_id, possession_id
+    MatchEvents
+    | where type in ("pass", "carry") and isnotempty(possession_id) and isnotnull(end_x)
+    | extend cx = min_of(toint(end_x / 8.75), 11), cy = min_of(toint(end_y / 8.5), 7)
+    | project match_id, possession_id, cx, cy
+    | join kind=inner (MatchEvents
+                       | where isnotempty(possession_id)
+                       | summarize shots = countif(type == "shot"), goals = countif(type == "shot" and outcome == "goal") by match_id, possession_id
+                       | extend shot = shots > 0, goal = goals > 0) on match_id, possession_id
     | summarize n = count(), p_shot = round(avg(iff(shot, 1.0, 0.0)), 4), p_goal = round(avg(iff(goal, 1.0, 0.0)), 4) by cx, cy
     | order by cy asc, cx asc
 }
 
 .create-or-alter function with (folder = "model", docstring = "Threat gained or lost by each pass and carry, from ThreatGrid")
 MoveValue(mid: string) {
-    let grid = ThreatGrid();
     MatchEvents
     | where match_id == mid and type in ("pass", "carry") and isnotnull(end_x)
     | extend cx = min_of(toint(x / 8.75), 11), cy = min_of(toint(y / 8.5), 7),
              ex = min_of(toint(end_x / 8.75), 11), ey = min_of(toint(end_y / 8.5), 7)
-    | join kind=leftouter (grid | project cx, cy, threat_start = p_goal) on cx, cy
-    | join kind=leftouter (grid | project ex = cx, ey = cy, threat_end = p_goal) on ex, ey
+    | join kind=leftouter (ThreatGrid() | project cx, cy, threat_start = p_goal) on cx, cy
+    | join kind=leftouter (ThreatGrid() | project ex = cx, ey = cy, threat_end = p_goal) on ex, ey
     | extend threat_start = coalesce(threat_start, 0.0), threat_end = coalesce(threat_end, 0.0)
     | extend move_value = round(iff(outcome == "complete", threat_end - threat_start, -threat_start), 4)
     | project match_id, event_id, clock_s, team_id, player_id, type, subtype, outcome, under_pressure,
@@ -110,13 +98,14 @@ MoveValue(mid: string) {
 
 .create-or-alter function with (folder = "model", docstring = "Per-player value: threat added by passes and carries, plus xG from shots")
 PlayerValue(mid: string) {
-    let mv = MoveValue(mid) | summarize threat_added = round(sum(move_value), 3), moves = count() by team_id, player_id;
-    let sh = MatchEvents | where match_id == mid and type == "shot" | summarize shots = count(), xg = round(sum(xg), 3), goals = countif(outcome == "goal") by team_id, player_id;
-    mv
-    | join kind=fullouter sh on team_id, player_id
+    MoveValue(mid)
+    | summarize threat_added = round(sum(move_value), 3), moves = count() by team_id, player_id
+    | join kind=fullouter (MatchEvents | where match_id == mid and type == "shot"
+                           | summarize shots = count(), xg = round(sum(xg), 3), goals = countif(outcome == "goal") by team_id, player_id) on team_id, player_id
     | extend team_id = coalesce(team_id, team_id1), player_id = coalesce(player_id, player_id1)
     | join kind=leftouter (Players | project player_id, name, shirt, role) on player_id
-    | project team_id, player_id, name, shirt, role, moves, threat_added, shots = coalesce(shots, 0), xg = coalesce(xg, 0.0), goals = coalesce(goals, 0)
+    | project team_id, player_id, name, shirt, role, moves = coalesce(moves, 0), threat_added = coalesce(threat_added, 0.0),
+              shots = coalesce(shots, 0), xg = coalesce(xg, 0.0), goals = coalesce(goals, 0)
     | order by threat_added desc
 }
 
@@ -221,11 +210,10 @@ TeamWindows(mid: string, window_s: real) {
 
 .create-or-alter function with (folder = "state", docstring = "Minute-by-minute momentum, positive = home. A five-minute rolling mean of the threat swing (xG, shots, final-third entries).")
 Momentum(mid: string) {
-    let home = toscalar(Matches | where match_id == mid | project home_team_id);
-    let away = toscalar(Matches | where match_id == mid | project away_team_id);
     TeamWindows(mid, 60.0)
-    | extend threat = 2.0 * xg + 0.25 * shots + 0.08 * final_third_entries
-    | summarize home_threat = round(sumif(threat, team_id == home), 3), away_threat = round(sumif(threat, team_id == away), 3) by minute = w
+    | extend threat = 2.0 * xg + 0.25 * shots + 0.08 * final_third_entries, k = 1
+    | join kind=inner (Matches | where match_id == mid | project home_team_id, away_team_id | extend k = 1) on k
+    | summarize home_threat = round(sumif(threat, team_id == home_team_id), 3), away_threat = round(sumif(threat, team_id == away_team_id), 3) by minute = w
     | order by minute asc
     | extend swing = home_threat - away_threat
     | extend momentum = round((swing + coalesce(prev(swing, 1), 0.0) + coalesce(prev(swing, 2), 0.0)
