@@ -47,9 +47,9 @@ routes and Cosmos DB behind `/state`; nothing upstream changes.
 Replay needs a Cosmos DB for NoSQL account; the template does not create one because the free tier
 (1000 RU/s and 25 GB, one account per subscription) is a choice made at account creation and cannot
 be combined with serverless. Create it in the portal with Capacity mode *Provisioned throughput* and
-*Apply Free Tier Discount*, then either let `infra/cosmos.bicep` create the database `matchlab` and
-container `matches` (partition key `/match_id`, 400 RU/s) by passing `cosmosAccountName`, or make
-them in Data Explorer yourself. The module also gives the services' identity the Cosmos DB Built-in
+*Apply Free Tier Discount*, then make the database `matchlab` and container `matches` (partition
+key `/match_id`, Manual 400 RU/s) in Data Explorer, or pass `cosmosCreateContainer=true` and let
+`infra/cosmos.bicep` create them. The module gives the services' identity the Cosmos DB Built-in
 Data Contributor role; on a laptop, give your own login the same role once:
 
 ```bash

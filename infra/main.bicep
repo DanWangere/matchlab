@@ -96,6 +96,9 @@ param cosmosAccountName string = ''
 @description('Resource group of that account (defaults to this one).')
 param cosmosResourceGroup string = resourceGroup().name
 
+@description('Also create the database and container (false when they were made in Data Explorer).')
+param cosmosCreateContainer bool = false
+
 @description('Rollouts per fork; 120 is about 0.5 s per fork on one vCPU.')
 param rollouts int = 120
 
@@ -170,6 +173,7 @@ module cosmos 'cosmos.bicep' = if (!empty(cosmosAccountName)) {
   params: {
     cosmosAccountName: cosmosAccountName
     principalId: identity.properties.principalId
+    createContainer: cosmosCreateContainer
   }
 }
 
