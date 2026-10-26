@@ -1,75 +1,148 @@
 # matchlab
 
-A synthetic football league with hidden ground truth and a deterministic, rewindable event
-simulator. It is the base layer of the match-intelligence project: everything downstream
-(Fabric ingestion, the Otherwise fork engine, the Undertow hidden-state estimator, the overlay
-renderer, the agents) consumes what this package produces.
+**Otherwise: the match that didn't happen, drawn on the one that did.**
 
-All clubs, players and matches are fictional. No real match data is included or required.
+A live football broadcast tells you what a player did. This shows what else they could have done,
+and what it would have been worth. A striker shoots from a tight angle; a ghost path appears on the
+pitch showing the square ball to the unmarked team-mate, with the chance of a goal within the next
+twenty events for each option, in English, French or Spanish, a few seconds after the shot. At
+full time, a recap of the five forks that decided the match.
 
-## What it produces
+Entry for the Microsoft x Premier League *Inside the Game* developer hackathon. Everything here is
+synthetic: twenty fictional clubs, 360 fictional players, and a simulator that generates the
+matches. No real match data is included or required.
 
-| Output | Where | Streamed? | Used by |
-| --- | --- | --- | --- |
-| Event stream, one row per on-ball action | `data/matches/<id>.events.jsonl` | yes | Eventstream, Eventhouse, renderer, agents |
-| Match metadata: line-ups, formations, venue | `data/matches/<id>.meta.json` | at kick-off | everything |
-| Hidden ground truth: momentum, fatigue, press intent, risk appetite per team per minute, plus every instruction change and its cause | `data/truth/<id>.truth.json` | never | Undertow training and scoring |
-| Fork record: the decision taken, the alternatives, their rollout values | `matchlab fork --out` | as a ghost cue (`--cue`, `--post`) | Otherwise |
-| Cues: timed overlay instructions in three languages | `matchlab play`, `cues.py` | yes | the renderer, any graphics partner |
-| JSON schema for the event | `data/event.schema.json` | | Eventhouse table definition |
-| Flat reference and truth files | `data/export/*.jsonl` (`matchlab export`) | | Eventhouse reference tables, Lakehouse |
+## How it works, in one paragraph
 
-Coordinates are metres on a 105 x 68 pitch, always in the acting team's attack frame
-(towards x = 105). A renderer flips the away team's events.
+The event stream comes from a **deterministic, rewindable simulator**. Because the same seed always
+produces the same match, a second copy of the simulator can **follow the live stream in exact
+step** and, just before a fork-worthy decision (every open-play shot, a final-third moment with a
+cross, through ball or shot available), **snapshot the match, force each alternative, roll it out
+a few hundred times, and restore**. Each branch is valued with a **threat grid learned from the
+league** (the chance that possession in each of 12 x 8 pitch cells becomes a goal), so a
+counterfactual is priced in half a second. The result is a *fork record*: the action taken, the
+best untaken one, the regret between them, and each candidate's probability under the team's own
+policy. A **Foundry agent team** turns the record into words: Explainer and Localiser write the
+three languages in one structured call, a deterministic **Verifier** rejects any number or name that
+is not in the record, and template text stands in for anything that fails. The overlay draws the
+ghost immediately from the template and **upgrades the words in place** when the model's text
+verifies. Fabric carries the stream (Eventstream to Eventhouse), the match state (fifteen KQL
+functions) and the studio dashboard; fork records and cues are written back to the same Eventhouse.
+
+## Architecture
+
+```
+ laptop / any producer                      Microsoft Fabric                              viewers
+ ┌──────────────────┐   Event Hub     ┌──────────────┐   direct ingest   ┌─────────────────────┐
+ │ matchlab stream  │ ─────────────▶  │ Eventstream  │ ────────────────▶ │ Eventhouse          │
+ │ (or a real feed) │   custom        │ matchlab-    │                   │ MatchEvents, Teams, │
+ └──────────────────┘   endpoint      │ events       │                   │ Players, Lineups,   │
+                                      └──────┬───────┘                   │ Matches, ThreatGrid │
+                                             │ custom endpoint           │ ForkRecords, Cues … │
+                                             ▼ destination "matchlab-out"│ 15 KQL functions    │
+ ┌────────────────────────────────────────────────────────────┐          │ Real-Time Dashboard │
+ │ matchlab forkd  (Azure Container Apps)                     │ ◀──────▶ │ "matchlab-studio"   │
+ │  Follower: deterministic twin of the match                 │ replay / └─────────────────────┘
+ │  ForkPolicy → snapshot, rollout alternatives, restore      │ ingest
+ │  ThreatGrid value → fork record (taken, best untaken,      │
+ │                     regret, candidates)                    │          ┌─────────────────────┐
+ │  Agents: Explainer+Localiser → Verifier → cue (EN/FR/ES)   │ ◀──────▶ │ Microsoft Foundry   │
+ │          Recap at full time                                │ Entra ID │ gpt-5.6-sol         │
+ └───────────────────────────┬────────────────────────────────┘          │ + evaluations       │
+                             │ POST /events /cues /meta  (X-Hub-Key)     └─────────────────────┘
+                             ▼
+ ┌────────────────────────────────────────────────────────────┐
+ │ matchlab serve  (Azure Container Apps, public)             │  SSE /stream   ┌──────────────┐
+ │  cue hub: match state in memory, fan-out over SSE          │ ─────────────▶ │ renderer/    │
+ │  renderer/index.html: 2D pitch, ghosts, lower thirds,      │                │ index.html   │
+ │  Analyst / Casual / Club / Player modes, EN / FR / ES       │                │ (browser)    │
+ └────────────────────────────────────────────────────────────┘                └──────────────┘
+```
+
+The hidden ground truth of the simulator (momentum, fatigue, press intent, risk appetite per team per
+minute, and every instruction change with its cause) is never streamed; it is exported to the
+Lakehouse for the second engine, Undertow, which is designed but not built in this entry.
 
 ## Run it
 
 ```bash
-pip install -e ".[dev]"          # stdlib only; pytest for the tests, azure-eventhub optional
+pip install -e ".[dev]"           # the core is stdlib only
 matchlab league --seed 7                                   # 20 clubs, 360 players
-matchlab generate --matches 20 --seed 1                    # matches + truth into data/
-matchlab stats data/matches/RAV-IRO-1000                   # one match's numbers
-matchlab stream data/matches/RAV-IRO-1000 --speed 20       # replay to stdout at 20x
-matchlab fork data/matches/RAV-IRO-1000 --rollouts 200     # price the biggest chance's alternatives
-matchlab export                                            # flat JSONL for Eventhouse and Lakehouse
-matchlab play data/matches/RAV-IRO-1000 --speed 20         # the overlay at http://localhost:8080 with baseline and fork cues
-matchlab forkd --source file --match data/matches/RAV-IRO-1000 --hub http://localhost:8080 --mirror   # Otherwise, live
-matchlab forkd ... --agents foundry --out runs/forks.jsonl   # the agent team writes the ghosts' words (needs az login)
-matchlab explain data/matches/RAV-IRO-1000 --agents foundry  # one fork through Explainer, Localiser, Verifier
-matchlab recap runs/forks.jsonl --agents foundry             # full-time story from the forks that mattered
-python -m pytest
+matchlab generate --matches 40 --seed 1                    # matches + hidden truth into data/
+matchlab play data/matches/RAV-IRO-1000 --speed 20         # the overlay at http://localhost:8080, forks precomputed
+python -m pytest                                           # 30 tests
 ```
+
+The live shape, three terminals (`.env` holds the Event Hub keys, the Eventhouse URIs and the hub
+key; it is gitignored). `stream` sends to the Eventstream's custom endpoint source; `forkd` reads the
+stream back through a custom endpoint destination (`EVENTHUB_READ_*`), in parallel with the
+Eventhouse ingestion:
+
+```bash
+matchlab serve                                                                   # 1. the hub + overlay
+matchlab forkd --source eventhub --hub http://localhost:8080 --mirror \
+    --agents foundry --out runs/forks.jsonl                                      # 2. Otherwise, live
+matchlab stream data/matches/RAV-IRO-1000 --speed 10 --sink eventhub --batch 20 --live-ts   # 3. the match
+```
+
+`--source eventhouse --match RAV-IRO-1000 [--follow]` replays a match already in the Eventhouse
+instead of reading the Event Hub; `--source file` needs neither. `--agents off` draws ghosts with
+template text only; `--agents fake` exercises the pipeline without Foundry. `--ingest` writes fork
+records and cues to the Eventhouse `ForkRecords` and `Cues` tables.
+
+Other commands: `stats` (one match's numbers), `stream` (to stdout, a file, HTTP or Event Hub),
+`fork` (price one decision's alternatives), `explain` (one fork through the agent team),
+`recap` (the full-time story), `export` (flat JSONL for Eventhouse and Lakehouse).
+
+- Fabric setup, one command at a time: [`fabric/README.md`](fabric/README.md)
+- The agent team, prompts, verifier and evaluations: [`docs/agents.md`](docs/agents.md)
+- Container Apps deployment, Bicep and the GitHub Actions workflow: [`docs/deploy.md`](docs/deploy.md)
 
 ## The overlay
 
-`matchlab play` serves `renderer/index.html` and replays a match into it over server-sent events,
-emitting cues on the match clock: the baseline cues computed from the stream (goals, big chances,
-hard passes, fastest shot, cards, substitutions, half and full time, a momentum dial every minute,
-player milestones) and ghost cues from forking the highest-xG shots before kick-off.
-
-The page draws a 2D pitch with both line-ups, the ball, the current pass or carry, name tags, the
-ghost path for a fork, a lower third, and a desk with the live cue stack, momentum, match stats and
-a feed. Four viewer modes read the same cues differently: Analyst (numbers, every cue), Casual
-(plain lines, the big moments), Club (one side's cues) and Player (one player's cues, a persistent
-tag, and their running numbers). Three languages, switchable live: English, French, Spanish.
+`renderer/index.html` draws a 2D pitch with both line-ups, the ball, the current pass or carry,
+name tags, the ghost path for a fork, a lower third, and a desk with the live cue stack, momentum,
+match stats and a feed. Four viewer modes read the same cues differently: Analyst (numbers, every
+cue), Casual (plain lines, the big moments), Club (one side's cues) and Player (one player's cues, a
+persistent tag, and their running numbers). Three languages, switchable live.
 
 Everything on screen comes from cues, never from raw events, so a broadcast graphics partner can
-consume the same objects (`matchlab/cues.py` documents the fields). `matchlab serve` runs the hub
-alone; feed it with `matchlab stream --sink http://localhost:8080/events` and
-`matchlab fork ... --post http://localhost:8080`, or POST to `/events`, `/cues` and `/meta` from
-anywhere. The production shape is the same with Cosmos DB and Web PubSub in place of the hub.
+consume the same objects. A cue has a layer (`tag`, `card`, `lower_third`, `ghost`, `dial`,
+`ledger`), text per language in two registers, geometry, the modes it belongs to, a priority and a
+window on the match clock (`matchlab/cues.py`). A ghost cue arrives twice: first with template text
+the moment the fork is priced, then again under the same `cue_id` with the agents' verified words;
+the overlay marks model text with a diamond and the fork's value model and verification state ride
+in the geometry.
 
+The baseline cues (goals, big chances, hard passes, fastest shot, cards, substitutions, half and
+full time, a momentum dial every minute, player milestones) are computed from the stream with no
+model at all.
 
-Streaming to a Fabric Eventstream: create a custom-endpoint source, copy its Event Hub
-connection string and name, then
+## Otherwise, in detail
 
-```bash
-pip install azure-eventhub
-export EVENTHUB_CONNECTION_STRING='...'; export EVENTHUB_NAME='...'
-matchlab stream data/matches/RAV-IRO-1000 --speed 10 --sink eventhub --batch 20 --live-ts
-```
-
-`--sink http://localhost:8080/events` posts JSON arrays to a local renderer or an Azure Function.
+- **Follower** (`follow.py`): keeps a simulator in step with the stream. Each incoming event is
+  compared with the twin's own next event (type, team, position); a mismatch is counted and reported,
+  never silently corrected. Across a full match the count is zero. The follower's policy decides when to fork: every open-play shot,
+  final-third moments with a through ball, cross or shot among the candidates, at most one every
+  45 seconds and 25 per match.
+- **Fork** (`fork.py`): `snapshot()`, then for each candidate action `rollout(horizon, action, salt)`
+  200 times (120 in the live service), then `restore()`. Candidates are the simulator's own
+  options with the probabilities its policy would have given them, so "the pass he didn't see" is a
+  real option with a real likelihood, not a hindsight invention.
+- **Value** (`threat.py`): goals within the horizon are too rare to separate options, so each
+  rollout is scored as goal difference plus half the xG plus 0.6 times the threat the possession
+  reached, where threat is the learned 12 x 8 grid of goal probability per cell. The same grid
+  lives in the Eventhouse as `ThreatGrid`, learned from the same matches in KQL. Candidates separate
+  after about 100 rollouts; a fork takes about half a second on one core.
+- **Regret** is the value of the best untaken option minus the taken one. Ghosts are posted when
+  regret is at least 0.03, and for every shot regardless, in a finer line when the shot was right.
+- **Agents** (`agents.py`): one structured call writes the analyst and casual lines in three
+  languages from a slimmed record whose percentages and regret are pre-rendered as strings, so the
+  model copies rather than computes. The Verifier accepts a number only if it is a rendering of a
+  value in the record (half-up, truncated, one decimal, signed hundredths) and a capitalised name
+  only if it belongs to a player or club in the match. Anything else falls back to the
+  template, per language. `evals/groundedness.py` scores a run locally and, with Azure AI
+  Evaluation, uploads groundedness and relevance to the Foundry project.
 
 ## How the simulator works
 
@@ -87,7 +160,8 @@ Three properties matter for the rest of the project:
   generator. `rollout(n, first_action, salt)` forces an action, continues for `n` events,
   and puts the match back exactly where it was. This is the simulator Otherwise borrows:
   no learned event model is needed to get a counterfactual that is exact under the league's
-  own policy.
+  own policy. With a real feed, a learned next-event model would take its place behind the same
+  `snapshot` / `rollout` / `restore` interface.
 - **Hidden state.** Press intent and risk appetite follow a pre-match schedule with planned
   shifts; substitutions and score state change them; momentum reacts to goals and drifts;
   fatigue rises with minutes and press intensity. They change pass selection, completion,
@@ -117,7 +191,13 @@ The knobs are at the top of `sim.py` (`BASE_WEIGHTS`, `TYPE_ADJ`, `HOME_EDGE`) a
 dataset, compare its per-match averages with `matchlab stats` across a batch and adjust
 there; the real data stays out of the repo.
 
-## Event schema notes
+## Event schema
+
+One row per on-ball action: `match_id, event_id, period, clock_s, ts, team_id, player_id, type,
+subtype, x, y, end_x, end_y, outcome, under_pressure, pass_length_m, pass_difficulty,
+ball_speed_mps, xg, possession_id, phase, related_event_id, score_home, score_away, detail`
+(`data/event.schema.json`). Coordinates are metres on a 105 x 68 pitch, always in the acting
+team's attack frame (towards x = 105); a renderer flips the away team's events.
 
 - `type`: pass, carry, shot, tackle, interception, clearance, pressure, foul,
   possession_change, substitution, card, kick_off, period_end.
@@ -130,30 +210,22 @@ there; the real data stays out of the repo.
 - `detail` carries extras: substitution on/off, card colour, period number.
 - Period 2 restarts `clock_s` at 2700; `ts` is wall clock for live replay.
 
-## Where this fits, and what comes next
+## Repository map
 
-1. **This package.** Generator, schema, stream, fork demo. Done.
-2. **Fabric.** Scripts and the setup guide are in [`fabric/`](fabric/README.md): Eventstream
-   custom-endpoint source fed by `matchlab stream`; Eventhouse tables for events, reference data,
-   fork records, ledger rows and cues; KQL functions for match state (possession chains, a threat
-   grid learned from the league, pass quality, speed metrics, windowed team features, momentum,
-   control versus chaos); Lakehouse for the truth files.
-3. **Cue contract and renderer.** Done locally: `cues.py`, `serve.py`, `renderer/index.html`,
-   `matchlab play`. Remaining for the cloud: Cosmos DB for cues and viewer profiles, Web PubSub
-   fan-out, the renderer hosted on Static Web Apps or Container Apps.
-4. **Otherwise.** Done: `matchlab forkd` (`follow.py`, `threat.py`, `forkd.py`). A Follower keeps a
-   deterministic copy of the match in step with the stream and forks just before each decision the
-   policy wants (every open-play shot, final-third moments with a through ball, cross or shot
-   available, at most one every 45 s). Branches are valued with a threat grid learned from the
-   league (the same 12 x 8 cells as the Eventhouse `ThreatGrid`), so candidates separate after
-   about 100 rollouts, 0.5 s per fork. Inputs: Event Hub (live), Eventhouse (replay or `--follow`),
-   file. Outputs: ghost cues to the hub, JSONL, `ForkRecords` and `Cues` in Eventhouse.
-5. **Foundry agents.** Done: `agents.py` and [`docs/agents.md`](docs/agents.md). Explainer and
-   Localiser on gpt-5.6-sol through the Foundry project (OpenAI client with Entra ID, or the
-   Microsoft Agent Framework), a deterministic Verifier that rejects any number or name not in the
-   fork record, Recap at full time, and `evals/groundedness.py` with Azure AI Evaluation. Template
-   text is the fallback, per language, so nothing unverified reaches the screen.
-6. **Undertow.** Pre-match ledger agent, windowed features in Eventstream, a state estimator
-   scored against the truth files, KQL anomaly detection, Activator rules, Attributor agent,
-   Real-Time Dashboard for the studio desk.
-7. **Deploy and document.** Container Apps and Functions, README, demo video.
+| Path | What |
+| --- | --- |
+| `matchlab/schema.py`, `league.py`, `truth.py`, `sim.py` | event contract, fictional league, hidden schedules, the simulator |
+| `matchlab/fork.py`, `threat.py`, `follow.py`, `forkd.py` | Otherwise: fork, value, follower, the service and its inputs and outputs |
+| `matchlab/cues.py`, `serve.py`, `renderer/index.html` | cue contract, hub, overlay |
+| `matchlab/agents.py`, `docs/agents.md`, `evals/` | the agent team on Foundry, its verifier and evaluations |
+| `matchlab/sinks.py`, `export.py`, `stats.py`, `cli.py` | outputs, exports, numbers, the command line |
+| `fabric/` | KQL tables, functions and queries; reference ingestion; the Fabric setup guide |
+| `infra/`, `Dockerfile`, `.github/workflows/` | Container Apps deployment, tests and image build on every push |
+
+## Status
+
+Built and run end to end: generator, stream into Fabric (Eventstream, Eventhouse, dashboard),
+the fork service on a live Event Hub and on Eventhouse replay, the overlay with ghosts, the agent
+team on gpt-5.6-sol through the Foundry project with verification and evaluation, Container Apps
+deployment. Deferred: **Undertow**, the hidden-state estimator with a pre-match assumption ledger,
+whose training data (the truth files) and KQL feature functions are already here.

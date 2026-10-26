@@ -59,19 +59,31 @@ class MetaStore:
 
 # ------------------------------------------------------------------ Eventhouse access
 
+def kusto_connection(uri: str) -> Any:
+    """How forkd signs in to Eventhouse, by where it runs. On a laptop: `az login`. In Azure (Container
+    Apps, a VM): the managed identity, found through DefaultAzureCredential when AZURE_CLIENT_ID is set
+    without a secret or the platform exposes an identity endpoint. With a client secret: that app.
+    Whichever identity it is must be a member of the Fabric workspace (Viewer reads; Contributor ingests)."""
+    from azure.kusto.data import KustoConnectionStringBuilder  # type: ignore
+
+    env = os.environ
+    if env.get("AZURE_CLIENT_SECRET"):
+        return KustoConnectionStringBuilder.with_aad_application_key_authentication(
+            uri, env["AZURE_CLIENT_ID"], env["AZURE_CLIENT_SECRET"], env["AZURE_TENANT_ID"])
+    if env.get("IDENTITY_ENDPOINT") or env.get("MSI_ENDPOINT") or env.get("AZURE_CLIENT_ID") or env.get("MATCHLAB_USE_DEFAULT_CREDENTIAL"):
+        from azure.identity import DefaultAzureCredential  # type: ignore
+
+        return KustoConnectionStringBuilder.with_azure_token_credential(uri, DefaultAzureCredential())
+    return KustoConnectionStringBuilder.with_az_cli_authentication(uri)
+
+
 class KustoQuery:
-    """Read from Eventhouse. Needs `pip install azure-kusto-data` and a login: `az login` for the
-    CLI credential, or AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET for an app."""
+    """Read from Eventhouse. Needs `pip install azure-kusto-data`; see `kusto_connection` for the sign-in."""
 
     def __init__(self, query_uri: str, database: str):
-        from azure.kusto.data import KustoClient, KustoConnectionStringBuilder  # type: ignore
+        from azure.kusto.data import KustoClient  # type: ignore
 
-        if os.environ.get("AZURE_CLIENT_SECRET"):
-            kcsb = KustoConnectionStringBuilder.with_aad_application_key_authentication(
-                query_uri, os.environ["AZURE_CLIENT_ID"], os.environ["AZURE_CLIENT_SECRET"], os.environ["AZURE_TENANT_ID"])
-        else:
-            kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(query_uri)
-        self.client = KustoClient(kcsb)
+        self.client = KustoClient(kusto_connection(query_uri))
         self.database = database
 
     def rows(self, query: str) -> list[dict[str, Any]]:
@@ -112,16 +124,10 @@ class KustoIngest:
     """Queued ingestion into ForkRecords and Cues. Needs `pip install azure-kusto-ingest`."""
 
     def __init__(self, ingest_uri: str, database: str):
-        from azure.kusto.data import KustoConnectionStringBuilder  # type: ignore
         from azure.kusto.data.data_format import DataFormat  # type: ignore
         from azure.kusto.ingest import IngestionProperties, QueuedIngestClient  # type: ignore
 
-        if os.environ.get("AZURE_CLIENT_SECRET"):
-            kcsb = KustoConnectionStringBuilder.with_aad_application_key_authentication(
-                ingest_uri, os.environ["AZURE_CLIENT_ID"], os.environ["AZURE_CLIENT_SECRET"], os.environ["AZURE_TENANT_ID"])
-        else:
-            kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(ingest_uri)
-        self.client = QueuedIngestClient(kcsb)
+        self.client = QueuedIngestClient(kusto_connection(ingest_uri))
         self.props = lambda table: IngestionProperties(database=database, table=table, data_format=DataFormat.MULTIJSON)
 
     def send(self, table: str, rows: list[dict[str, Any]]) -> None:
@@ -161,12 +167,19 @@ def eventhouse_events(kql: KustoQuery, match_id: str, follow: bool = False, poll
 
 def eventhub_events(connection_string: Optional[str] = None, name: Optional[str] = None, consumer_group: str = "$Default",
                     from_start: bool = False) -> Iterator[Event]:
-    """Tail the Eventstream's Event Hub. Uses the same connection string as `matchlab stream`."""
+    """Tail the Eventstream over its custom endpoint *destination*, the Event Hub compatible outlet the
+    Eventstream offers to consumers. Reads EVENTHUB_READ_CONNECTION_STRING and EVENTHUB_READ_NAME (that
+    destination's keys), falling back to the EVENTHUB_* pair `matchlab stream` sends with, which only
+    works when that endpoint is itself readable by a second consumer."""
     import queue
     from azure.eventhub import EventHubConsumerClient  # type: ignore
 
-    cs = connection_string or os.environ["EVENTHUB_CONNECTION_STRING"]
-    nm = name or os.environ["EVENTHUB_NAME"]
+    env = os.environ
+    cs = connection_string or env.get("EVENTHUB_READ_CONNECTION_STRING") or env.get("EVENTHUB_CONNECTION_STRING")
+    nm = name or env.get("EVENTHUB_READ_NAME") or env.get("EVENTHUB_NAME")
+    if not cs or not nm:
+        raise SystemExit("set EVENTHUB_READ_CONNECTION_STRING and EVENTHUB_READ_NAME in this terminal, from the Eventstream's custom endpoint "
+                         "destination (a new terminal does not inherit them; `source .env`)")
     q: "queue.Queue[Optional[Event]]" = queue.Queue(maxsize=10000)
 
     def on_event(partition_context: Any, event: Any) -> None:
@@ -191,14 +204,31 @@ def eventhub_events(connection_string: Optional[str] = None, name: Optional[str]
 
     client = EventHubConsumerClient.from_connection_string(cs, consumer_group=consumer_group, eventhub_name=nm)
 
+    def on_error(partition_context: Any, error: Exception) -> None:
+        where = f"partition {partition_context.partition_id}" if partition_context else "the connection"
+        print(f"eventhub: error on {where}: {error}", file=sys.stderr)
+
     def run() -> None:
-        with client:
-            client.receive(on_event=on_event, starting_position="-1" if from_start else "@latest")
+        try:
+            with client:
+                client.receive(on_event=on_event, on_error=on_error, starting_position="-1" if from_start else "@latest")
+        except Exception as e:  # auth and connection failures surface here
+            print(f"eventhub: receive stopped: {e}", file=sys.stderr)
+            q.put(None)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
+    print(f"eventhub: listening on {nm} (consumer group {consumer_group}, {'from start' if from_start else 'new events only'})", file=sys.stderr)
+    waited = 0.0
     while True:
-        ev = q.get()
+        try:
+            ev = q.get(timeout=15)
+        except queue.Empty:
+            waited += 15
+            if waited in (15.0, 60.0, 180.0):
+                print(f"eventhub: no events after {int(waited)}s. Is `matchlab stream` sending? forkd must read the Eventstream's custom "
+                      f"endpoint destination (EVENTHUB_READ_*), not the source it is sent to; or use --source eventhouse.", file=sys.stderr)
+            continue
         if ev is None:
             return
         yield ev
@@ -227,6 +257,7 @@ class Outputs:
 
     def __post_init__(self) -> None:
         if self.file_path:
+            os.makedirs(os.path.dirname(self.file_path) or ".", exist_ok=True)
             self._file = open(self.file_path, "a", encoding="utf-8")
 
     def _pipeline(self, match_id: str) -> Any:
@@ -344,8 +375,9 @@ class ForkService:
         if self.hub_url:
             try:
                 import urllib.request
+                from .sinks import hub_headers
                 req = urllib.request.Request(self.hub_url.rstrip("/") + "/meta", data=json.dumps(meta).encode("utf-8"),
-                                             headers={"Content-Type": "application/json"}, method="POST")
+                                             headers={"Content-Type": "application/json", **hub_headers()}, method="POST")
                 urllib.request.urlopen(req, timeout=5).read()
             except Exception:
                 pass

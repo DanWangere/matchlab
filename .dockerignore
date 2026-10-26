@@ -1,0 +1,14 @@
+.git
+.venv
+data
+runs
+docs
+evals
+fabric
+infra
+tests
+.github
+.pytest_cache
+__pycache__
+*.pyc
+.env

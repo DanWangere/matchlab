@@ -11,3 +11,14 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: python -m pytest -q
       - run: matchlab league && matchlab generate --matches 2 && matchlab fork data/matches/$(ls data/matches | head -1 | sed 's/\.events\.jsonl//;s/\.meta\.json//') --rollouts 20
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg MATCHES=4 -t matchlab:ci .
+      - run: |
+          docker run -d --rm -p 8080:8080 --name hub matchlab:ci
+          for i in $(seq 1 15); do curl -fsS localhost:8080/healthz && break || sleep 2; done
+          docker run --rm --network host matchlab:ci matchlab forkd --source file --match data/matches/$(docker run --rm matchlab:ci sh -c 'ls data/matches | head -1 | sed "s/\.events\.jsonl//;s/\.meta\.json//"') --hub http://localhost:8080 --mirror --rollouts 20 --max-forks 3 --cue-min-regret -1 --out /tmp/runs/forks.jsonl --quiet
+          curl -fsS localhost:8080/state | python3 -c "import json,sys; s=json.load(sys.stdin); assert s['meta'] and any(c['layer']=='ghost' for c in s['cues']); print('ghosts on the hub:', sum(c['layer']=='ghost' for c in s['cues']))"
+          docker stop hub

@@ -32,12 +32,18 @@ class FileSink:
         self.f.close()
 
 
+def hub_headers() -> dict[str, str]:
+    """The hub's write key, when one is set (MATCHLAB_HUB_KEY), as the header the hub checks."""
+    key = os.environ.get("MATCHLAB_HUB_KEY")
+    return {"X-Hub-Key": key} if key else {}
+
+
 class HttpSink:
     """POSTs each batch as a JSON array. Useful for a local renderer or an Azure Function."""
 
     def __init__(self, url: str, headers: dict[str, str] | None = None):
         self.url = url
-        self.headers = {"Content-Type": "application/json", **(headers or {})}
+        self.headers = {"Content-Type": "application/json", **hub_headers(), **(headers or {})}
 
     def send(self, batch: list[dict[str, Any]]) -> None:
         req = urllib.request.Request(self.url, data=json.dumps(batch).encode("utf-8"), headers=self.headers, method="POST")
@@ -55,8 +61,11 @@ class EventHubSink:
     def __init__(self, connection_string: str | None = None, name: str | None = None):
         from azure.eventhub import EventData, EventHubProducerClient  # type: ignore
 
-        cs = connection_string or os.environ["EVENTHUB_CONNECTION_STRING"]
-        nm = name or os.environ["EVENTHUB_NAME"]
+        cs = connection_string or os.environ.get("EVENTHUB_CONNECTION_STRING")
+        nm = name or os.environ.get("EVENTHUB_NAME")
+        if not cs or not nm:
+            raise SystemExit("set EVENTHUB_CONNECTION_STRING and EVENTHUB_NAME in this terminal (from the Eventstream's custom endpoint source, "
+                             "SAS Key Authentication); a new terminal does not inherit them. Tip: put the two export lines in .env and run `source .env`.")
         self._EventData = EventData
         self.client = EventHubProducerClient.from_connection_string(cs, eventhub_name=nm)
 

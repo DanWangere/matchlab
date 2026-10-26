@@ -1,0 +1,102 @@
+# Deploys the hub and the fork service to Azure Container Apps.
+#
+# One-time setup (see docs/deploy.md): a resource group, a federated credential for this repo on an
+# Entra app or managed identity with Contributor + User Access Administrator on that group, and
+# these repository secrets and variables:
+#   secrets:   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#              MATCHLAB_HUB_KEY, EVENTHUB_CONNECTION_STRING, EVENTHUB_NAME (the custom endpoint destination forkd reads),
+#              KUSTO_QUERY_URI, KUSTO_INGEST_URI (optional)
+#   variables: AZURE_RESOURCE_GROUP, AZURE_LOCATION, FOUNDRY_MODEL_ENDPOINT, FOUNDRY_DEPLOYMENT,
+#              FOUNDRY_ACCOUNT_NAME, FOUNDRY_RESOURCE_GROUP (optional), FORKD_SOURCE (optional), FORKD_MATCH (optional)
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Where forkd reads the match from"
+        type: choice
+        options: [eventhub, eventhouse]
+        default: eventhub
+      match:
+        description: "Match id (eventhouse source only)"
+        default: ""
+      agents:
+        description: "Agent team"
+        type: choice
+        options: [foundry, framework, fake, "off"]
+        default: foundry
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP || 'rg-matchlab' }}
+      LOCATION: ${{ vars.AZURE_LOCATION || 'swedencentral' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resource group
+        run: az group create -n "$RG" -l "$LOCATION" -o none
+
+      - name: Phase 1, registry, identity, environment
+        id: base
+        run: |
+          az deployment group create -g "$RG" -n matchlab-base -f infra/main.bicep \
+            -p hubKey="${{ secrets.MATCHLAB_HUB_KEY }}" -o none
+          echo "registry=$(az deployment group show -g "$RG" -n matchlab-base --query properties.outputs.registryLoginServer.value -o tsv)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the image
+        run: |
+          REGISTRY="${{ steps.base.outputs.registry }}"
+          az acr build --registry "${REGISTRY%%.*}" --image "matchlab:${GITHUB_SHA::12}" --file Dockerfile . -o none
+
+      - name: Phase 2, the apps
+        id: apps
+        run: |
+          az deployment group create -g "$RG" -n matchlab-apps -f infra/main.bicep \
+            -p imageTag="${GITHUB_SHA::12}" \
+               hubKey="${{ secrets.MATCHLAB_HUB_KEY }}" \
+               forkdSource="${{ inputs.source || vars.FORKD_SOURCE || 'eventhub' }}" \
+               forkdMatch="${{ inputs.match || vars.FORKD_MATCH || '' }}" \
+               agents="${{ inputs.agents || 'foundry' }}" \
+               eventHubConnectionString="${{ secrets.EVENTHUB_CONNECTION_STRING }}" \
+               eventHubName="${{ secrets.EVENTHUB_NAME }}" \
+               kustoQueryUri="${{ secrets.KUSTO_QUERY_URI }}" \
+               kustoIngestUri="${{ secrets.KUSTO_INGEST_URI }}" \
+               foundryModelEndpoint="${{ vars.FOUNDRY_MODEL_ENDPOINT }}" \
+               foundryDeployment="${{ vars.FOUNDRY_DEPLOYMENT || 'gpt-5.6-sol' }}" \
+               foundryAccountName="${{ vars.FOUNDRY_ACCOUNT_NAME }}" \
+               foundryResourceGroup="${{ vars.FOUNDRY_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP || 'rg-matchlab' }}" \
+            -o none
+          echo "hub=$(az deployment group show -g "$RG" -n matchlab-apps --query properties.outputs.hubUrl.value -o tsv)" >> "$GITHUB_OUTPUT"
+          echo "principal=$(az deployment group show -g "$RG" -n matchlab-apps --query properties.outputs.identityPrincipalId.value -o tsv)" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS "${{ steps.apps.outputs.hub }}/healthz"; then exit 0; fi
+            sleep 10
+          done
+          echo "hub did not answer" && exit 1
+
+      - name: Summary
+        run: |
+          {
+            echo "## matchlab"
+            echo "- overlay: ${{ steps.apps.outputs.hub }}"
+            echo "- fork service identity (principal id): \`${{ steps.apps.outputs.principal }}\`"
+            echo "- add that identity to the Fabric workspace (Contributor) for Eventhouse reads and ingestion"
+          } >> "$GITHUB_STEP_SUMMARY"

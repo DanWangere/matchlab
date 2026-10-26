@@ -32,7 +32,8 @@ from .league import League
 from .schema import Event
 from .sinks import read_jsonl
 
-RENDERER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "renderer", "index.html")
+RENDERER = os.environ.get("MATCHLAB_RENDERER") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "renderer", "index.html")
 
 
 class Hub:
@@ -82,6 +83,12 @@ class Hub:
 HUB = Hub()
 
 
+def hub_key() -> Optional[str]:
+    """When MATCHLAB_HUB_KEY is set, POSTs must carry it in X-Hub-Key. Readers stay open: the overlay
+    is meant to be watched. Unset (the default, local use), anything may post."""
+    return os.environ.get("MATCHLAB_HUB_KEY") or None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # quiet
         pass
@@ -100,6 +107,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, f.read(), "text/html; charset=utf-8")
         elif self.path.startswith("/state"):
             self._send(200, json.dumps({"meta": HUB.meta, "cues": HUB.cues}).encode("utf-8"))
+        elif self.path.startswith("/healthz"):
+            self._send(200, json.dumps({"ok": True, "viewers": len(HUB.clients), "cues": len(HUB.cues)}).encode("utf-8"))
         elif self.path.startswith("/stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -123,6 +132,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b'{"error":"not found"}')
 
     def do_POST(self) -> None:  # noqa: N802
+        key = hub_key()
+        if key and self.headers.get("X-Hub-Key") != key:
+            self._send(401, b'{"error":"missing or wrong X-Hub-Key"}')
+            return
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or b"null")
         if self.path.startswith("/events"):
@@ -145,7 +158,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Hub-Key")
         self.end_headers()
 
 

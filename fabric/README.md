@@ -78,9 +78,16 @@ On the live run it inferred `event_id`, `xg` and `related_event_id` differently 
 
 then stream the match again. Events sent before the destination was configured are not stored.
 
-The topology is `matchlab-sim -> matchlab-events -> MatchEvents`. If you later add an Event
-Processor step (filtering, windowing in the stream), keep the direct path too; the raw table is
-what the fork service and the renderer replay from.
+6. Add a second destination for the fork service: **Custom endpoint**, named `matchlab-out`. Publish.
+   Select its node; under **Details > Event Hub > SAS Key Authentication** copy *its* **Event hub
+   name** and **Connection string-primary key**. These are the fork service's read credentials
+   (`EVENTHUB_READ_NAME`, `EVENTHUB_READ_CONNECTION_STRING`, section 7). The source endpoint is
+   where producers send; a consumer reads the stream through a destination endpoint, with its own
+   consumer group (`$Default` unless you add one in the destination's settings).
+
+The topology is `matchlab-sim -> matchlab-events -> MatchEvents` and `-> matchlab-out`. If you
+later add an Event Processor step (filtering, windowing in the stream), keep the direct path too; the
+raw table is what the fork service and the renderer replay from.
 
 ## 4. Stream a match
 
@@ -140,19 +147,23 @@ Activator works on a query over the Eventhouse or directly on the Eventstream. T
 `Matches` and `Lineups` tables) and the league file; it learns the threat grid from the matches in
 `data/` once and caches it in `data/threat_grid.json`.
 
-Live, tailing the same Event Hub the Eventstream reads (the two environment variables from section 4):
+Live, reading the Eventstream through its custom endpoint destination `matchlab-out` (section 3.6).
+`.env` holds both pairs: the source's keys for `stream`, the destination's for `forkd`:
 
 ```bash
 python -m pip install azure-eventhub
+export EVENTHUB_READ_CONNECTION_STRING='Endpoint=sb://...'        # from matchlab-out
+export EVENTHUB_READ_NAME='es_..._out'                             # its event hub name
 matchlab serve                                                   # terminal 1: the renderer at :8080
 matchlab forkd --source eventhub --hub http://localhost:8080 --mirror   # terminal 2: follow and fork
 matchlab stream data/matches/RAV-IRO-1000 --speed 10 --sink eventhub --batch 20 --live-ts   # terminal 3
 ```
 
 `--mirror` forwards the events it reads to the renderer, so the overlay and the ghosts come from one
-process. The Eventhouse keeps filling from the Eventstream in parallel. A second consumer on the same
-Event Hub needs its own consumer group if the Eventstream's reader is already using `$Default`; add
-one in the custom endpoint source's settings and pass `--consumer-group <name>`.
+process. The Eventhouse keeps filling from the Eventstream in parallel. `forkd` prints "listening on
+..." at start and, if nothing arrives in 15 s, says so; a receive error (wrong key, no Listen right)
+is printed rather than swallowed. `--consumer-group <name>` selects a group you added on the
+destination; `--from-start` replays what the destination still retains.
 
 Replaying a match already in Eventhouse (no Event Hub needed):
 

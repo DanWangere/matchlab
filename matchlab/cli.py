@@ -355,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--kusto-query-uri", default=None)
     s.add_argument("--kusto-ingest-uri", default=None)
     s.add_argument("--kusto-database", default=None)
-    s.add_argument("--consumer-group", default="$Default")
+    s.add_argument("--consumer-group", default="$Default", help="eventhub: consumer group on the Eventstream's custom endpoint destination")
     s.add_argument("--from-start", action="store_true", help="eventhub: read from the beginning of retention instead of new events only")
     s.add_argument("--follow", action="store_true", help="eventhouse: keep polling for new rows")
     s.add_argument("--agents", choices=["off", "fake", "foundry", "framework"], default="off",
