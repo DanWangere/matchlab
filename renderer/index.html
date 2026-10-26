@@ -190,20 +190,20 @@
   const UI = {
     en: { now: "Now", momentum: "Momentum", match: "Match", feed: "Feed", waiting: "waiting for a match", live: "live", over: "full time",
           possession: "possession", passes: "passes", shots: "shots", xg: "xG", pressures: "pressures", analyst: "Analyst", casual: "Casual", club: "Club", player: "Player",
-          touches: "touches", completion: "completion", carried: "carried", empty: "Cues appear here as the match plays.", pickTeam: "Pick a club", pickPlayer: "Pick a player", replayPick: "Watch a match again", play: "Play", stop: "Stop", replay: "replay",
+          touches: "touches", completion: "completion", carried: "carried", empty: "Cues appear here as the match plays.", pickTeam: "Pick a club", pickPlayer: "Pick a player", replayPick: "Watch a match again", play: "Play", stop: "Stop", replay: "replay", stopped: "replay stopped",
           ev: { pass: "pass", carry: "carry", shot: "shot", tackle: "tackle", interception: "interception", clearance: "clearance", pressure: "pressure", foul: "foul", possession_change: "turnover", substitution: "substitution", card: "card", kick_off: "kick-off", period_end: "end of period", goal: "goal" } },
     fr: { now: "Maintenant", momentum: "Momentum", match: "Match", feed: "Fil", waiting: "en attente d'un match", live: "en direct", over: "fin du match",
           possession: "possession", passes: "passes", shots: "tirs", xg: "xG", pressures: "pressings", analyst: "Analyste", casual: "Fan", club: "Club", player: "Joueur",
-          touches: "touches", completion: "réussite", carried: "parcourus", empty: "Les cues apparaissent ici pendant le match.", pickTeam: "Choisir un club", pickPlayer: "Choisir un joueur", replayPick: "Revoir un match", play: "Lire", stop: "Stop", replay: "replay",
+          touches: "touches", completion: "réussite", carried: "parcourus", empty: "Les cues apparaissent ici pendant le match.", pickTeam: "Choisir un club", pickPlayer: "Choisir un joueur", replayPick: "Revoir un match", play: "Lire", stop: "Stop", replay: "replay", stopped: "replay arrêté",
           ev: { pass: "passe", carry: "conduite", shot: "tir", tackle: "tacle", interception: "interception", clearance: "dégagement", pressure: "pressing", foul: "faute", possession_change: "perte de balle", substitution: "remplacement", card: "carton", kick_off: "coup d'envoi", period_end: "fin de période", goal: "but" } },
     es: { now: "Ahora", momentum: "Momentum", match: "Partido", feed: "Jugadas", waiting: "esperando un partido", live: "en directo", over: "final",
           possession: "posesión", passes: "pases", shots: "disparos", xg: "xG", pressures: "presiones", analyst: "Analista", casual: "Aficionado", club: "Club", player: "Jugador",
-          touches: "toques", completion: "acierto", carried: "conducidos", empty: "Las cues aparecen aquí durante el partido.", pickTeam: "Elige un club", pickPlayer: "Elige un jugador", replayPick: "Ver un partido de nuevo", play: "Ver", stop: "Parar", replay: "repetición",
+          touches: "toques", completion: "acierto", carried: "conducidos", empty: "Las cues aparecen aquí durante el partido.", pickTeam: "Elige un club", pickPlayer: "Elige un jugador", replayPick: "Ver un partido de nuevo", play: "Ver", stop: "Parar", replay: "repetición", stopped: "repetición detenida",
           ev: { pass: "pase", carry: "conducción", shot: "disparo", tackle: "entrada", interception: "intercepción", clearance: "despeje", pressure: "presión", foul: "falta", possession_change: "pérdida", substitution: "cambio", card: "tarjeta", kick_off: "saque inicial", period_end: "fin del periodo", goal: "gol" } },
   };
 
   const S = { mode: "analyst", lang: "en", focusTeam: "", focusPlayer: "", meta: null, names: {}, teamOf: {}, side: {},
-              slots: { home: {}, away: {} }, score: [0, 0], clock: 0, period: 1, live: false, cues: [], feed: [], stats: {}, ps: {}, dial: null, lastLower: null, lowerTimer: 0, replaying: false };
+              slots: { home: {}, away: {} }, score: [0, 0], clock: 0, period: 1, live: false, cues: [], feed: [], stats: {}, ps: {}, dial: null, lastLower: null, lowerTimer: 0, replaying: false, stopped: false };
   const $ = (id) => document.getElementById(id);
   const t = () => UI[S.lang];
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -216,7 +216,7 @@
   // ---------- meta
   function setMeta(meta) {
     S.meta = meta; S.names = {}; S.teamOf = {}; S.slots = { home: {}, away: {} }; S.score = [0, 0]; S.clock = 0; S.period = 1;
-    S.cues = []; S.feed = []; S.stats = {}; S.ps = {}; S.dial = null; S.live = true;
+    S.cues = []; S.feed = []; S.stats = {}; S.ps = {}; S.dial = null; S.live = true; S.stopped = false;
     for (const side of ["home", "away"]) {
       const team = meta[side];
       S.side[team.team_id] = side; S.names[team.team_id] = team.name;
@@ -376,7 +376,7 @@
   function renderBug() {
     $("score").textContent = `${S.score[0]}–${S.score[1]}`;
     $("clock").textContent = S.period === 2 && S.clock < 2700 ? "45:00" : mmss(S.clock);
-    const st = $("status"); st.textContent = S.replaying ? t().replay : S.meta ? (S.live ? t().live : t().over) : t().waiting; st.classList.toggle("live", !!S.meta && S.live && !S.replaying);
+    const st = $("status"); st.textContent = S.replaying ? t().replay : S.stopped ? t().stopped : S.meta ? (S.live ? t().live : t().over) : t().waiting; st.classList.toggle("live", !!S.meta && S.live && !S.replaying && !S.stopped);
   }
   function renderStats() {
     if (!S.meta) return;
@@ -438,7 +438,7 @@
   }
   function renderReplayBtn() { const b = $("replayBtn"); b.textContent = S.replaying ? t().stop : t().play; b.setAttribute("aria-pressed", S.replaying); }
   $("replayBtn").addEventListener("click", async () => {
-    if (S.replaying) { await fetch("/replay/stop", { method: "POST" }); S.replaying = false; renderReplayBtn(); renderBug(); return; }
+    if (S.replaying) { await fetch("/replay/stop", { method: "POST" }); S.replaying = false; S.stopped = true; S.live = false; renderReplayBtn(); renderBug(); return; }
     const id = $("replayPick").value; if (!id) return;
     const r = await fetch(`/replay/${encodeURIComponent(id)}?speed=10&force=1`, { method: "POST" });
     if (r.status === 202) { S.replaying = true; renderReplayBtn(); } else { const d = await r.json(); $("status").textContent = d.error || "replay refused"; }
