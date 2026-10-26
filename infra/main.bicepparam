@@ -14,6 +14,8 @@ param foundryDeployment = 'gpt-5.6-sol'
 param foundryAccountName = ''            // the AI Services account; empty skips the role assignment
 param foundryResourceGroup = 'rg-matchlab'
 param agents = 'foundry'
+param cosmosAccountName = ''             // existing Cosmos DB for NoSQL account (free tier is fine); empty = no replay
+param cosmosResourceGroup = 'rg-matchlab'
 // Secrets come from the environment:  export HUB_KEY=... EVENTHUB_CONNECTION_STRING=...
 param hubKey = readEnvironmentVariable('HUB_KEY', '')
 param eventHubConnectionString = readEnvironmentVariable('EVENTHUB_CONNECTION_STRING', '')

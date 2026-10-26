@@ -7,7 +7,8 @@
 #              MATCHLAB_HUB_KEY, EVENTHUB_CONNECTION_STRING, EVENTHUB_NAME (the custom endpoint destination forkd reads),
 #              KUSTO_QUERY_URI, KUSTO_INGEST_URI (optional)
 #   variables: AZURE_RESOURCE_GROUP, AZURE_LOCATION, FOUNDRY_MODEL_ENDPOINT, FOUNDRY_DEPLOYMENT,
-#              FOUNDRY_ACCOUNT_NAME, FOUNDRY_RESOURCE_GROUP (optional), FORKD_SOURCE (optional), FORKD_MATCH (optional)
+#              FOUNDRY_ACCOUNT_NAME, FOUNDRY_RESOURCE_GROUP (optional), FORKD_SOURCE (optional), FORKD_MATCH (optional),
+#              COSMOS_ACCOUNT_NAME, COSMOS_RESOURCE_GROUP (optional; the replay store)
 name: deploy
 
 on:
@@ -80,6 +81,8 @@ jobs:
                foundryDeployment="${{ vars.FOUNDRY_DEPLOYMENT || 'gpt-5.6-sol' }}" \
                foundryAccountName="${{ vars.FOUNDRY_ACCOUNT_NAME }}" \
                foundryResourceGroup="${{ vars.FOUNDRY_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP || 'rg-matchlab' }}" \
+               cosmosAccountName="${{ vars.COSMOS_ACCOUNT_NAME }}" \
+               cosmosResourceGroup="${{ vars.COSMOS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP || 'rg-matchlab' }}" \
             -o none
           echo "hub=$(az deployment group show -g "$RG" -n matchlab-apps --query properties.outputs.hubUrl.value -o tsv)" >> "$GITHUB_OUTPUT"
           echo "principal=$(az deployment group show -g "$RG" -n matchlab-apps --query properties.outputs.identityPrincipalId.value -o tsv)" >> "$GITHUB_OUTPUT"

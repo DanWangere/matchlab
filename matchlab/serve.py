@@ -43,6 +43,9 @@ class Hub:
         self.meta: Optional[dict[str, Any]] = None
         self.cues: list[dict[str, Any]] = []
         self.recent_events: list[dict[str, Any]] = []
+        self.last_event_at: float = 0.0       # wall clock of the last event posted from outside (a live match)
+        self.store: Any = None                # a matchlab.replay.CosmosStore, when COSMOS_ENDPOINT is set
+        self.replay: Optional[dict[str, Any]] = None   # the replay in progress: match_id, speed, started, stop event
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=5000)
@@ -71,6 +74,8 @@ class Hub:
                 self.recent_events.append(payload)
                 if len(self.recent_events) > 3000:
                     del self.recent_events[:1000]
+                if self.replay is None:
+                    self.last_event_at = time.time()
             elif kind == "reset":
                 self.cues, self.recent_events = [], []
             for q in list(self.clients):
@@ -78,6 +83,62 @@ class Hub:
                     q.put_nowait((kind, payload))
                 except queue.Full:
                     pass
+
+    # ---- replay: a stored match, paced out again to everyone connected
+
+    def get_store(self) -> Any:
+        if self.store is None and os.environ.get("COSMOS_ENDPOINT"):
+            from .replay import CosmosStore
+            self.store = CosmosStore()
+        return self.store
+
+    def live(self, within_s: float = 10.0) -> bool:
+        return time.time() - self.last_event_at < within_s
+
+    def start_replay(self, match_id: str, speed: float = 10.0, baseline: bool = True, force: bool = False,
+                     bundle: Optional[dict[str, Any]] = None) -> tuple[int, dict[str, Any]]:
+        """Returns (http status, body). 409 when a replay is running or a live match is on the hub."""
+        from .replay import pace
+        if self.replay is not None:
+            return 409, {"error": "a replay is running", "replay": self.replay_status()}
+        if self.live() and not force:
+            return 409, {"error": "a live match is on the hub; add force=1 to replace it"}
+        if bundle is None:
+            store = self.get_store()
+            if store is None:
+                return 503, {"error": "no replay store: set COSMOS_ENDPOINT on the hub"}
+            try:
+                bundle = store.bundle(match_id)
+            except Exception as e:
+                return 502, {"error": f"replay store: {e}"}
+            if bundle is None:
+                return 404, {"error": f"no stored match {match_id}"}
+        stop = threading.Event()
+        self.replay = {"match_id": match_id, "speed": speed, "started": time.time(), "stop": stop,
+                       "events": len(bundle["events"]), "cues": len(bundle["cues"])}
+
+        def run() -> None:
+            try:
+                pace(bundle, lambda m: self.broadcast("meta", m), lambda e: self.broadcast("event", e),
+                     lambda c: self.broadcast("cue", c), speed=speed, baseline=baseline, stop=stop)
+            finally:
+                self.replay = None
+
+        threading.Thread(target=run, daemon=True).start()
+        return 202, {"ok": True, "replay": self.replay_status()}
+
+    def stop_replay(self) -> bool:
+        r = self.replay
+        if r is None:
+            return False
+        r["stop"].set()
+        return True
+
+    def replay_status(self) -> Optional[dict[str, Any]]:
+        r = self.replay
+        if r is None:
+            return None
+        return {k: v for k, v in r.items() if k != "stop"}
 
 
 HUB = Hub()
@@ -108,7 +169,17 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/state"):
             self._send(200, json.dumps({"meta": HUB.meta, "cues": HUB.cues}).encode("utf-8"))
         elif self.path.startswith("/healthz"):
-            self._send(200, json.dumps({"ok": True, "viewers": len(HUB.clients), "cues": len(HUB.cues)}).encode("utf-8"))
+            self._send(200, json.dumps({"ok": True, "viewers": len(HUB.clients), "cues": len(HUB.cues), "live": HUB.live(),
+                                        "replay": HUB.replay_status()}).encode("utf-8"))
+        elif self.path.startswith("/matches"):
+            store = HUB.get_store()
+            try:
+                rows = store.matches() if store is not None else []
+                self._send(200, json.dumps({"matches": rows, "store": store is not None}, default=str).encode("utf-8"))
+            except Exception as e:
+                self._send(502, json.dumps({"error": f"replay store: {e}"}).encode("utf-8"))
+        elif self.path.startswith("/replay"):
+            self._send(200, json.dumps({"replay": HUB.replay_status(), "live": HUB.live()}).encode("utf-8"))
         elif self.path.startswith("/stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -132,6 +203,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b'{"error":"not found"}')
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path.startswith("/replay"):   # replays rebroadcast stored data; no write key, but never over a live match
+            from urllib.parse import parse_qs, urlparse
+            u = urlparse(self.path)
+            q = {k: v[-1] for k, v in parse_qs(u.query).items()}
+            target = u.path[len("/replay"):].strip("/")
+            if target == "stop":
+                self._send(200, json.dumps({"stopped": HUB.stop_replay()}).encode("utf-8"))
+                return
+            if not target:
+                self._send(400, b'{"error":"POST /replay/<match_id>?speed=10"}')
+                return
+            code, out = HUB.start_replay(target, speed=float(q.get("speed", 10)), baseline=q.get("baseline", "1") != "0",
+                                         force=q.get("force") == "1")
+            self._send(code, json.dumps(out).encode("utf-8"))
+            return
         key = hub_key()
         if key and self.headers.get("X-Hub-Key") != key:
             self._send(401, b'{"error":"missing or wrong X-Hub-Key"}')
@@ -236,6 +322,8 @@ def play(match_prefix: str, league_path: Optional[str], speed: float, port: int,
 def serve_only(port: int) -> None:
     start_server(port)
     print(f"renderer at http://localhost:{port}/   POST events to /events, cues to /cues, metadata to /meta", file=sys.stderr)
+    if os.environ.get("COSMOS_ENDPOINT"):
+        print(f"replay store: {os.environ['COSMOS_ENDPOINT']}   GET /matches, POST /replay/<match_id>?speed=10", file=sys.stderr)
     try:
         while True:
             time.sleep(3600)

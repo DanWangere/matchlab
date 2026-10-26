@@ -246,6 +246,8 @@ class Outputs:
     model: Any = None                 # a matchlab.agents ModelClient; None keeps template text
     metas: Any = None                 # MetaStore, needed to build a Pipeline per match
     sync_agents: bool = False         # True: wait for the model before returning (tests, explain)
+    store: Any = None                 # a matchlab.replay.CosmosStore; the replay record of the match
+    _chunker: Any = None
     _file: Any = None
     _pipelines: dict = field(default_factory=dict)
     _threads: list = field(default_factory=list)
@@ -259,6 +261,21 @@ class Outputs:
         if self.file_path:
             os.makedirs(os.path.dirname(self.file_path) or ".", exist_ok=True)
             self._file = open(self.file_path, "a", encoding="utf-8")
+        if self.store is not None:
+            from .replay import EventChunker
+            self._chunker = EventChunker(self.store)
+
+    def on_meta(self, meta: dict[str, Any]) -> None:
+        """A match starts: its metadata is the first replay document."""
+        if self.store is not None:
+            try:
+                self.store.put_meta(meta, ended=False)
+            except Exception as e:
+                print(f"  replay store write failed: {e}", file=sys.stderr)
+
+    def on_event(self, ev: Event) -> None:
+        if self._chunker is not None:
+            self._chunker.on_event(ev)
 
     def _pipeline(self, match_id: str) -> Any:
         if self.model is None or self.metas is None:
@@ -324,6 +341,13 @@ class Outputs:
                 HttpSink(self.hub_url.rstrip("/") + "/cues").send([cue.to_dict()])
             except Exception as e:
                 print(f"  hub post failed: {e}", file=sys.stderr)
+        if self.store is not None and shown:
+            try:
+                c = cue.to_dict()
+                c["geometry"] = {k: v for k, v in c["geometry"].items() if k != "update"}   # the stored cue is the final one
+                self.store.put_cue(c)
+            except Exception as e:
+                print(f"  replay store write failed: {e}", file=sys.stderr)
         if self.ingest and shown:
             try:
                 c = cue.to_dict()
@@ -345,6 +369,8 @@ class Outputs:
 
     def close(self) -> None:
         self.wait()
+        if self._chunker is not None:
+            self._chunker.close()
         if self._file:
             self._file.close()
 
@@ -381,6 +407,7 @@ class ForkService:
                 urllib.request.urlopen(req, timeout=5).read()
             except Exception:
                 pass
+        self.outputs.on_meta(meta)
         f = Follower(self.league, meta, self.policy, grid=self.grid, on_fork=self.outputs.on_fork)
         self.followers[match_id] = f
         return f
@@ -398,6 +425,7 @@ class ForkService:
                     HttpSink(self.hub_url.rstrip("/") + "/events").send([ev.to_dict()])
                 except Exception:
                     pass
+            self.outputs.on_event(ev)
             f.on_event(ev)
         summary = {"events": n, "seconds": round(time.time() - t0, 1), "matches": {}}
         for mid, f in self.followers.items():

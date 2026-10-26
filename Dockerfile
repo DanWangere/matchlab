@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 COPY pyproject.toml README.md ./
 COPY matchlab ./matchlab
 COPY renderer ./renderer
-RUN pip install -e ".[eventhub,fabric,agents]"
+RUN pip install -e ".[eventhub,fabric,agents,cosmos]"
 
 ARG LEAGUE_SEED=7
 ARG MATCHES=40

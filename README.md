@@ -48,15 +48,18 @@ functions) and the studio dashboard; fork records and cues are written back to t
  │                     regret, candidates)                    │          ┌─────────────────────┐
  │  Agents: Explainer+Localiser → Verifier → cue (EN/FR/ES)   │ ◀──────▶ │ Microsoft Foundry   │
  │          Recap at full time                                │ Entra ID │ gpt-5.6-sol         │
- └───────────────────────────┬────────────────────────────────┘          │ + evaluations       │
-                             │ POST /events /cues /meta  (X-Hub-Key)     └─────────────────────┘
-                             ▼
- ┌────────────────────────────────────────────────────────────┐
- │ matchlab serve  (Azure Container Apps, public)             │  SSE /stream   ┌──────────────┐
- │  cue hub: match state in memory, fan-out over SSE          │ ─────────────▶ │ renderer/    │
- │  renderer/index.html: 2D pitch, ghosts, lower thirds,      │                │ index.html   │
- │  Analyst / Casual / Club / Player modes, EN / FR / ES       │                │ (browser)    │
- └────────────────────────────────────────────────────────────┘                └──────────────┘
+ └──────┬────────────────────┬────────────────────────────────┘          │ + evaluations       │
+        │ meta, events per   │ POST /events /cues /meta  (X-Hub-Key)     └─────────────────────┘
+        │ minute, final cues ▼
+        │          ┌────────────────────────────────────────────────────────────┐
+        │          │ matchlab serve  (Azure Container Apps, public)             │  SSE /stream   ┌──────────────┐
+        ▼          │  cue hub: match state in memory, fan-out over SSE          │ ─────────────▶ │ renderer/    │
+ ┌──────────────┐  │  renderer/index.html: 2D pitch, ghosts, lower thirds,      │                │ index.html   │
+ │ Cosmos DB    │  │  Analyst / Casual / Club / Player modes, EN / FR / ES       │                │ (browser)    │
+ │ matches/     │◀─│  POST /replay/<match_id>: the stored match, paced out again │                │  "Watch a    │
+ │ /match_id    │  └────────────────────────────────────────────────────────────┘                │   match      │
+ └──────────────┘                                                                                │   again"     │
+                                                                                                 └──────────────┘
 ```
 
 The hidden ground truth of the simulator (momentum, fatigue, press intent, risk appetite per team per
@@ -66,11 +69,11 @@ Lakehouse for the second engine, Undertow, which is designed but not built in th
 ## Run it
 
 ```bash
-pip install -e ".[dev]"           # the core is stdlib only
+pip install -e ".[dev]"           # the core is stdlib only; extras: eventhub, fabric, agents, cosmos
 matchlab league --seed 7                                   # 20 clubs, 360 players
 matchlab generate --matches 40 --seed 1                    # matches + hidden truth into data/
 matchlab play data/matches/RAV-IRO-1000 --speed 20         # the overlay at http://localhost:8080, forks precomputed
-python -m pytest                                           # 30 tests
+python -m pytest                                           # 36 tests
 ```
 
 The live shape, three terminals (`.env` holds the Event Hub keys, the Eventhouse URIs and the hub
@@ -89,6 +92,13 @@ matchlab stream data/matches/RAV-IRO-1000 --speed 10 --sink eventhub --batch 20 
 instead of reading the Event Hub; `--source file` needs neither. `--agents off` draws ghosts with
 template text only; `--agents fake` exercises the pipeline without Foundry. `--ingest` writes fork
 records and cues to the Eventhouse `ForkRecords` and `Cues` tables.
+
+**Replay for the viewer.** With `COSMOS_ENDPOINT` set (and `az login` done), `forkd` also records
+the match in Cosmos DB as it runs: the metadata, the events chunked per minute, and every cue in its
+final, verified wording. The overlay then offers "Watch a match again": the hub reads the match
+back and paces it out to everyone connected, ghosts where they were, through the same stream. From
+the terminal: `matchlab replay --list`, `matchlab replay RAV-IRO-1000 --speed 10`, or without
+Cosmos, `matchlab replay --source file data/matches/RAV-IRO-1000 --forks runs/forks.jsonl`.
 
 Other commands: `stats` (one match's numbers), `stream` (to stdout, a file, HTTP or Event Hub),
 `fork` (price one decision's alternatives), `explain` (one fork through the agent team),
@@ -136,6 +146,11 @@ model at all.
   after about 100 rollouts; a fork takes about half a second on one core.
 - **Regret** is the value of the best untaken option minus the taken one. Ghosts are posted when
   regret is at least 0.03, and for every shot regardless, in a finer line when the shot was right.
+- **Replay** (`replay.py`): the fork service is the writer, so the replay store holds exactly what
+  was shown, with a cue upgraded in place stored once under its `cue_id`. A replay is one partition
+  read (`/match_id`) and a pacer that re-emits events and cues on the match clock; the baseline
+  cues are recomputed from the events because they are deterministic. The Eventhouse keeps the
+  analytics; Cosmos DB serves viewers.
 - **Agents** (`agents.py`): one structured call writes the analyst and casual lines in three
   languages from a slimmed record whose percentages and regret are pre-rendered as strings, so the
   model copies rather than computes. The Verifier accepts a number only if it is a rendering of a
@@ -217,6 +232,7 @@ team's attack frame (towards x = 105); a renderer flips the away team's events.
 | `matchlab/schema.py`, `league.py`, `truth.py`, `sim.py` | event contract, fictional league, hidden schedules, the simulator |
 | `matchlab/fork.py`, `threat.py`, `follow.py`, `forkd.py` | Otherwise: fork, value, follower, the service and its inputs and outputs |
 | `matchlab/cues.py`, `serve.py`, `renderer/index.html` | cue contract, hub, overlay |
+| `matchlab/replay.py` | the Cosmos DB replay store, the per-minute event writer, the pacer |
 | `matchlab/agents.py`, `docs/agents.md`, `evals/` | the agent team on Foundry, its verifier and evaluations |
 | `matchlab/sinks.py`, `export.py`, `stats.py`, `cli.py` | outputs, exports, numbers, the command line |
 | `fabric/` | KQL tables, functions and queries; reference ingestion; the Fabric setup guide |
@@ -226,6 +242,6 @@ team's attack frame (towards x = 105); a renderer flips the away team's events.
 
 Built and run end to end: generator, stream into Fabric (Eventstream, Eventhouse, dashboard),
 the fork service on a live Event Hub and on Eventhouse replay, the overlay with ghosts, the agent
-team on gpt-5.6-sol through the Foundry project with verification and evaluation, Container Apps
-deployment. Deferred: **Undertow**, the hidden-state estimator with a pre-match assumption ledger,
+team on gpt-5.6-sol through the Foundry project with verification and evaluation, replay from Cosmos
+DB, Container Apps deployment. Deferred: **Undertow**, the hidden-state estimator with a pre-match assumption ledger,
 whose training data (the truth files) and KQL feature functions are already here.

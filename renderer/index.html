@@ -162,6 +162,10 @@
         <button data-lang="es" aria-pressed="false">ES</button>
       </div>
     </div>
+    <div class="row2" id="replayRow" hidden>
+      <select id="replayPick" aria-label="Replay"></select>
+      <div class="seg" id="replayCtl"><button id="replayBtn" aria-pressed="false">Play</button></div>
+    </div>
   </div>
   <div class="section">
     <h2 id="hNow">Now</h2>
@@ -186,20 +190,20 @@
   const UI = {
     en: { now: "Now", momentum: "Momentum", match: "Match", feed: "Feed", waiting: "waiting for a match", live: "live", over: "full time",
           possession: "possession", passes: "passes", shots: "shots", xg: "xG", pressures: "pressures", analyst: "Analyst", casual: "Casual", club: "Club", player: "Player",
-          touches: "touches", completion: "completion", carried: "carried", empty: "Cues appear here as the match plays.", pickTeam: "Pick a club", pickPlayer: "Pick a player",
+          touches: "touches", completion: "completion", carried: "carried", empty: "Cues appear here as the match plays.", pickTeam: "Pick a club", pickPlayer: "Pick a player", replayPick: "Watch a match again", play: "Play", stop: "Stop", replay: "replay",
           ev: { pass: "pass", carry: "carry", shot: "shot", tackle: "tackle", interception: "interception", clearance: "clearance", pressure: "pressure", foul: "foul", possession_change: "turnover", substitution: "substitution", card: "card", kick_off: "kick-off", period_end: "end of period", goal: "goal" } },
     fr: { now: "Maintenant", momentum: "Momentum", match: "Match", feed: "Fil", waiting: "en attente d'un match", live: "en direct", over: "fin du match",
           possession: "possession", passes: "passes", shots: "tirs", xg: "xG", pressures: "pressings", analyst: "Analyste", casual: "Fan", club: "Club", player: "Joueur",
-          touches: "touches", completion: "réussite", carried: "parcourus", empty: "Les cues apparaissent ici pendant le match.", pickTeam: "Choisir un club", pickPlayer: "Choisir un joueur",
+          touches: "touches", completion: "réussite", carried: "parcourus", empty: "Les cues apparaissent ici pendant le match.", pickTeam: "Choisir un club", pickPlayer: "Choisir un joueur", replayPick: "Revoir un match", play: "Lire", stop: "Stop", replay: "replay",
           ev: { pass: "passe", carry: "conduite", shot: "tir", tackle: "tacle", interception: "interception", clearance: "dégagement", pressure: "pressing", foul: "faute", possession_change: "perte de balle", substitution: "remplacement", card: "carton", kick_off: "coup d'envoi", period_end: "fin de période", goal: "but" } },
     es: { now: "Ahora", momentum: "Momentum", match: "Partido", feed: "Jugadas", waiting: "esperando un partido", live: "en directo", over: "final",
           possession: "posesión", passes: "pases", shots: "disparos", xg: "xG", pressures: "presiones", analyst: "Analista", casual: "Aficionado", club: "Club", player: "Jugador",
-          touches: "toques", completion: "acierto", carried: "conducidos", empty: "Las cues aparecen aquí durante el partido.", pickTeam: "Elige un club", pickPlayer: "Elige un jugador",
+          touches: "toques", completion: "acierto", carried: "conducidos", empty: "Las cues aparecen aquí durante el partido.", pickTeam: "Elige un club", pickPlayer: "Elige un jugador", replayPick: "Ver un partido de nuevo", play: "Ver", stop: "Parar", replay: "repetición",
           ev: { pass: "pase", carry: "conducción", shot: "disparo", tackle: "entrada", interception: "intercepción", clearance: "despeje", pressure: "presión", foul: "falta", possession_change: "pérdida", substitution: "cambio", card: "tarjeta", kick_off: "saque inicial", period_end: "fin del periodo", goal: "gol" } },
   };
 
   const S = { mode: "analyst", lang: "en", focusTeam: "", focusPlayer: "", meta: null, names: {}, teamOf: {}, side: {},
-              slots: { home: {}, away: {} }, score: [0, 0], clock: 0, period: 1, live: false, cues: [], feed: [], stats: {}, ps: {}, dial: null, lastLower: null, lowerTimer: 0 };
+              slots: { home: {}, away: {} }, score: [0, 0], clock: 0, period: 1, live: false, cues: [], feed: [], stats: {}, ps: {}, dial: null, lastLower: null, lowerTimer: 0, replaying: false };
   const $ = (id) => document.getElementById(id);
   const t = () => UI[S.lang];
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -372,7 +376,7 @@
   function renderBug() {
     $("score").textContent = `${S.score[0]}–${S.score[1]}`;
     $("clock").textContent = S.period === 2 && S.clock < 2700 ? "45:00" : mmss(S.clock);
-    const st = $("status"); st.textContent = S.meta ? (S.live ? t().live : t().over) : t().waiting; st.classList.toggle("live", !!S.meta && S.live);
+    const st = $("status"); st.textContent = S.replaying ? t().replay : S.meta ? (S.live ? t().live : t().over) : t().waiting; st.classList.toggle("live", !!S.meta && S.live && !S.replaying);
   }
   function renderStats() {
     if (!S.meta) return;
@@ -417,8 +421,29 @@
   $("modes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return;
     S.mode = b.dataset.mode; document.querySelectorAll("#modes button").forEach((x) => x.setAttribute("aria-pressed", x === b)); S.cues = []; if (S.meta) fillFocus(); renderAll(); });
   $("langs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return;
-    S.lang = b.dataset.lang; document.querySelectorAll("#langs button").forEach((x) => x.setAttribute("aria-pressed", x === b)); if (S.meta) fillFocus(); renderAll(); if (S.dial) renderMomentum(); });
+    S.lang = b.dataset.lang; document.querySelectorAll("#langs button").forEach((x) => x.setAttribute("aria-pressed", x === b)); if (S.meta) fillFocus(); renderAll(); if (S.dial) renderMomentum(); if (!$("replayRow").hidden) { renderReplayBtn(); loadReplays(); } });
   $("focus").addEventListener("change", (e) => { if (S.mode === "club") S.focusTeam = e.target.value; if (S.mode === "player") S.focusPlayer = e.target.value; S.cues = []; renderAll(); });
+
+  // ---------- replay: stored matches the hub can pace out again (needs the hub's Cosmos DB store)
+  async function loadReplays() {
+    try {
+      const r = await fetch("/matches"); if (!r.ok) return; const d = await r.json();
+      if (!d.store || !d.matches.length) return;
+      const sel = $("replayPick"); sel.innerHTML = `<option value="">${esc(t().replayPick)}</option>` +
+        d.matches.map((m) => { const sc = m.score ? `${m.score.home}–${m.score.away}` : "…"; const day = (m.kickoff || "").slice(0, 10);
+          return `<option value="${esc(m.match_id)}">${esc(m.home)} ${sc} ${esc(m.away)}  ${day}</option>`; }).join("");
+      $("replayRow").hidden = false;
+      const st = await (await fetch("/replay")).json(); S.replaying = !!st.replay; renderReplayBtn();
+    } catch (e) { /* no store on this hub */ }
+  }
+  function renderReplayBtn() { const b = $("replayBtn"); b.textContent = S.replaying ? t().stop : t().play; b.setAttribute("aria-pressed", S.replaying); }
+  $("replayBtn").addEventListener("click", async () => {
+    if (S.replaying) { await fetch("/replay/stop", { method: "POST" }); S.replaying = false; renderReplayBtn(); renderBug(); return; }
+    const id = $("replayPick").value; if (!id) return;
+    const r = await fetch(`/replay/${encodeURIComponent(id)}?speed=10&force=1`, { method: "POST" });
+    if (r.status === 202) { S.replaying = true; renderReplayBtn(); } else { const d = await r.json(); $("status").textContent = d.error || "replay refused"; }
+  });
+  setInterval(async () => { if (!$("replayRow").hidden && S.replaying) { try { const st = await (await fetch("/replay")).json(); if (!st.replay) { S.replaying = false; renderReplayBtn(); renderBug(); } } catch (e) {} } }, 5000);
 
   // ---------- the stream
   function connect() {
@@ -429,7 +454,7 @@
     es.addEventListener("reset", () => { S.cues = []; S.feed = []; renderAll(); });
     es.onerror = () => { $("status").textContent = "reconnecting…"; };
   }
-  renderLabels(); renderBug(); connect();
+  renderLabels(); renderBug(); connect(); loadReplays();
 })();
 </script>
 </body>

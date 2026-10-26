@@ -9,6 +9,7 @@ import random
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from .export import export_all
 from .fork import action_events, fork, rebuild_to_event
@@ -153,8 +154,15 @@ def cmd_forkd(a: argparse.Namespace) -> int:
     if a.agents != "off":
         from .agents import make_model
         model = make_model(a.agents)
+    store = None
+    if a.store:
+        from .replay import CosmosStore
+        store = CosmosStore()
+        if not store.endpoint:
+            print("--store needs COSMOS_ENDPOINT (the Cosmos DB account URI)", file=sys.stderr)
+            return 2
     outputs = Outputs(hub_url=a.hub, file_path=a.out, ingest=ingest, quiet=a.quiet, cue_min_regret=a.cue_min_regret, model=model, metas=metas,
-                      sync_agents=a.sync_agents)
+                      sync_agents=a.sync_agents, store=store)
     service = ForkService(league, metas, grid, policy, outputs, hub_url=a.hub)
     if a.source == "file":
         if not a.match:
@@ -169,7 +177,7 @@ def cmd_forkd(a: argparse.Namespace) -> int:
     else:
         events = eventhub_events(consumer_group=a.consumer_group, from_start=a.from_start)
     print(f"forkd: source={a.source} value={a.value} rollouts={a.rollouts} horizon={a.horizon}"
-          f"{' hub=' + a.hub if a.hub else ''}{' ingest=on' if ingest else ''}", file=sys.stderr)
+          f"{' hub=' + a.hub if a.hub else ''}{' ingest=on' if ingest else ''}{' store=' + store.endpoint if store else ''}", file=sys.stderr)
     try:
         summary = service.run(events, mirror_events_to_hub=a.mirror)
     except KeyboardInterrupt:
@@ -179,7 +187,55 @@ def cmd_forkd(a: argparse.Namespace) -> int:
     if model is not None:
         summary["agents"] = {"kind": a.agents, "verified": outputs.verified, "fallbacks": outputs.fallbacks,
                              "model_calls": getattr(model, "calls", None), "model_seconds": round(getattr(model, "seconds", 0.0), 1)}
+    if store is not None:
+        summary["store"] = {"endpoint": store.endpoint, "writes": store.writes}
     print(json.dumps(summary, indent=1), file=sys.stderr)
+    return 0
+
+
+def cmd_replay(a: argparse.Namespace) -> int:
+    """Pace a stored match out again through the hub: from Cosmos DB, or from the data files."""
+    from .replay import CosmosStore, file_bundle, pace
+    from .sinks import HttpSink, hub_headers
+
+    if a.list:
+        store = CosmosStore()
+        for m in store.matches():
+            sc = m.get("score") or {}
+            print(f"{m['match_id']:<16} {m.get('home','?'):>4} {sc.get('home','-')}-{sc.get('away','-')} {m.get('away','?'):<4}  "
+                  f"{(m.get('kickoff') or '')[:16]}  {'full time' if m.get('ended') else 'in progress'}")
+        return 0
+    if a.source == "file":
+        bundle = file_bundle(a.match, a.forks)
+    else:
+        store = CosmosStore()
+        if not store.endpoint:
+            print("set COSMOS_ENDPOINT, or use --source file with a data/matches/<id> prefix", file=sys.stderr)
+            return 2
+        bundle = store.bundle(a.match)
+        if bundle is None:
+            print(f"no stored match {a.match} (matchlab replay --list shows what there is)", file=sys.stderr)
+            return 1
+    hub = a.hub.rstrip("/")
+    import urllib.request
+
+    def post(path: str, payload: Any) -> None:
+        req = urllib.request.Request(hub + path, data=json.dumps(payload).encode("utf-8"),
+                                     headers={"Content-Type": "application/json", **hub_headers()}, method="POST")
+        urllib.request.urlopen(req, timeout=10).read()
+
+    meta = bundle["meta"]
+    print(f"replaying {meta['match_id']}: {meta['home']['name']} v {meta['away']['name']} at {a.speed}x "
+          f"({len(bundle['events'])} events, {len(bundle['cues'])} stored cues) to {hub}", file=sys.stderr)
+    events_sink = HttpSink(hub + "/events")
+    cues_sink = HttpSink(hub + "/cues")
+    try:
+        counts = pace(bundle, lambda m: post("/meta", m), lambda e: events_sink.send([e]), lambda c: cues_sink.send([c]),
+                      speed=a.speed, baseline=not a.no_baseline)
+    except KeyboardInterrupt:
+        print("stopped", file=sys.stderr)
+        return 0
+    print(f"replayed {counts['events']} events and {counts['cues']} cues", file=sys.stderr)
     return 0
 
 
@@ -362,7 +418,19 @@ def main(argv: list[str] | None = None) -> int:
                    help="write the ghost text with the agent team: foundry (OpenAI client on the Foundry endpoint), framework (Microsoft Agent Framework), fake (offline)")
     s.add_argument("--sync-agents", action="store_true", help="wait for the model before continuing (default: the ghost posts at once with template words and is upgraded in place)")
     s.add_argument("--quiet", action="store_true")
+    s.add_argument("--store", action=argparse.BooleanOptionalAction, default=bool(os.environ.get("COSMOS_ENDPOINT")),
+                   help="write the match, its events and its final cues to Cosmos DB for replay (default: on when COSMOS_ENDPOINT is set)")
     s.set_defaults(fn=cmd_forkd)
+
+    s = sub.add_parser("replay", help="pace a stored match out again through the hub, ghosts included")
+    s.add_argument("match", nargs="?", default=None, help="match id in Cosmos DB, or a path prefix with --source file")
+    s.add_argument("--source", choices=["cosmos", "file"], default="cosmos")
+    s.add_argument("--forks", default="runs/forks.jsonl", help="file source: the forkd record file whose ghosts to replay")
+    s.add_argument("--hub", default="http://localhost:8080")
+    s.add_argument("--speed", type=float, default=10.0, help="match seconds per wall second")
+    s.add_argument("--no-baseline", action="store_true", help="stored cues only; skip the goal, card and momentum cues recomputed from the events")
+    s.add_argument("--list", action="store_true", help="list the matches in the store")
+    s.set_defaults(fn=cmd_replay)
 
     s = sub.add_parser("explain", help="run one fork through Explainer, Localiser and Verifier and print the result")
     s.add_argument("match", help="path prefix, e.g. data/matches/RAV-IRO-1000")

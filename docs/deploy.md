@@ -21,6 +21,28 @@ Its three write routes (`POST /events`, `/cues`, `/meta`) are guarded by `MATCHL
 one replica, put Web PubSub behind the same three routes and Cosmos DB behind `/state`; nothing
 upstream changes.
 
+## The replay store
+
+Replay needs a Cosmos DB for NoSQL account; the template does not create one because the free tier
+(1000 RU/s and 25 GB, one account per subscription) is a choice made at account creation and cannot
+be combined with serverless. Create it in the portal with Capacity mode *Provisioned throughput* and
+*Apply Free Tier Discount*, then either let `infra/cosmos.bicep` create the database `matchlab` and
+container `matches` (partition key `/match_id`, 400 RU/s) by passing `cosmosAccountName`, or make
+them in Data Explorer yourself. The module also gives the services' identity the Cosmos DB Built-in
+Data Contributor role; on a laptop, give your own login the same role once:
+
+```bash
+az cosmosdb sql role assignment create --account-name <account> --resource-group <rg> \
+  --role-definition-id 00000000-0000-0000-0000-000000000002 \
+  --principal-id $(az ad signed-in-user show --query id -o tsv) --scope "/"
+export COSMOS_ENDPOINT='https://<account>.documents.azure.com:443/'
+```
+
+With `COSMOS_ENDPOINT` set, `forkd` records every match it follows (`--no-store` turns it off) and
+the hub offers `GET /matches` and `POST /replay/<match_id>?speed=10`; the overlay shows the picker.
+A replay never starts over a live match unless `force=1` is passed. `COSMOS_KEY` is accepted instead
+of a role, for an emulator or a throwaway account.
+
 ## Deploy from GitHub Actions
 
 1. **Resource group and OIDC.** Create an app registration (or a user-assigned identity) with a
@@ -36,7 +58,8 @@ upstream changes.
 3. **Repository variables:** `AZURE_RESOURCE_GROUP`, `AZURE_LOCATION`, `FOUNDRY_MODEL_ENDPOINT`
    (`https://<account>.services.ai.azure.com/openai/v1`), `FOUNDRY_DEPLOYMENT`,
    `FOUNDRY_ACCOUNT_NAME` and `FOUNDRY_RESOURCE_GROUP` (so the identity gets the Azure AI User role
-   on the account; leave the name empty to assign it by hand).
+   on the account; leave the name empty to assign it by hand), `COSMOS_ACCOUNT_NAME` and
+   `COSMOS_RESOURCE_GROUP` for the replay store (leave empty for no replay).
 4. **Run the `deploy` workflow** (Actions, deploy, Run workflow). It deploys the base resources,
    builds the image in the registry with `az acr build`, deploys the two apps, and waits for
    `/healthz`. The run summary prints the overlay URL and the identity's principal id.

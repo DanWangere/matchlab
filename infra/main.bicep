@@ -68,6 +68,12 @@ param foundryResourceGroup string = resourceGroup().name
 @description('Rollouts per fork; 120 is about 0.5 s per fork on one vCPU.')
 param rollouts int = 120
 
+@description('Name of an existing Cosmos DB for NoSQL account for the replay store; empty leaves replay off.')
+param cosmosAccountName string = ''
+
+@description('Resource group of that account (defaults to this one).')
+param cosmosResourceGroup string = resourceGroup().name
+
 var registryName = toLower(replace('${baseName}acr${uniqueString(resourceGroup().id)}', '-', ''))
 var deployApps = !empty(imageTag)
 var image = '${registry.properties.loginServer}/${baseName}:${imageTag}'
@@ -127,6 +133,21 @@ module foundryRole 'foundry-role.bicep' = if (!empty(foundryAccountName)) {
   }
 }
 
+module cosmos 'cosmos.bicep' = if (!empty(cosmosAccountName)) {
+  name: 'cosmos-${baseName}'
+  scope: resourceGroup(cosmosResourceGroup)
+  params: {
+    cosmosAccountName: cosmosAccountName
+    principalId: identity.properties.principalId
+  }
+}
+
+var cosmosEndpoint = empty(cosmosAccountName) ? '' : cosmos.outputs.endpoint
+var cosmosEnv = [
+  { name: 'COSMOS_ENDPOINT', value: cosmosEndpoint }
+  { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
+]
+
 // The hub keeps cues and recent events in memory and fans them out over SSE, so it runs as one
 // replica. Swap in Web PubSub + Cosmos DB behind the same three POST routes to scale out.
 resource hub 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
@@ -159,9 +180,9 @@ resource hub 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
           image: image
           command: ['matchlab', 'serve', '--port', '8080']
           resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: [
+          env: concat([
             { name: 'MATCHLAB_HUB_KEY', secretRef: 'hub-key' }
-          ]
+          ], cosmosEnv)
           probes: [
             { type: 'Liveness', httpGet: { path: '/healthz', port: 8080 }, periodSeconds: 30 }
             { type: 'Readiness', httpGet: { path: '/healthz', port: 8080 }, periodSeconds: 10 }
@@ -218,10 +239,9 @@ resource forkd 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
             { name: 'KUSTO_QUERY_URI', value: kustoQueryUri }
             { name: 'KUSTO_INGEST_URI', value: kustoIngestUri }
             { name: 'KUSTO_DATABASE', value: kustoDatabase }
-            { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
             { name: 'FOUNDRY_MODEL_ENDPOINT', value: foundryModelEndpoint }
             { name: 'FOUNDRY_DEPLOYMENT', value: foundryDeployment }
-          ])
+          ], cosmosEnv)
         }
       ]
       scale: { minReplicas: 1, maxReplicas: 1 }
@@ -234,3 +254,4 @@ output registryLoginServer string = registry.properties.loginServer
 output identityPrincipalId string = identity.properties.principalId
 output identityClientId string = identity.properties.clientId
 output hubUrl string = deployApps ? 'https://${hub.properties.configuration.ingress.fqdn}' : ''
+output cosmosEndpoint string = cosmosEndpoint
