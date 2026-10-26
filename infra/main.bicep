@@ -99,10 +99,11 @@ param rollouts int = 120
 param hubAlwaysOn bool = false
 
 var registryName = toLower(replace('${baseName}acr${uniqueString(resourceGroup().id)}', '-', ''))
-var image = createRegistry ? (empty(imageTag) ? '' : '${registry.properties.loginServer}/${baseName}:${imageTag}') : imageRef
-var deployApps = !empty(image)
+// deployApps must be decidable before deployment starts (it gates resources), so it looks only at parameters.
+var deployApps = createRegistry ? !empty(imageTag) : !empty(imageRef)
+var image = createRegistry ? (empty(imageTag) ? '' : '${registry!.properties.loginServer}/${baseName}:${imageTag}') : imageRef
 var acrPullRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
-var registryServer = createRegistry ? registry.properties.loginServer : (empty(imageRef) ? '' : split(imageRef, '/')[0])
+var registryServer = createRegistry ? registry!.properties.loginServer : (empty(imageRef) ? '' : split(imageRef, '/')[0])
 var privateRegistry = !createRegistry && !empty(registryPassword)
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
@@ -308,7 +309,7 @@ resource forkd 'Microsoft.App/jobs@2024-03-01' = if (deployApps) {
   dependsOn: [acrPull, hub]
 }
 
-output registryLoginServer string = createRegistry ? registry.properties.loginServer : ''
+output registryLoginServer string = createRegistry ? registry!.properties.loginServer : ''
 output identityPrincipalId string = identity.properties.principalId
 output identityClientId string = identity.properties.clientId
 output hubUrl string = deployApps ? 'https://${hub!.properties.configuration.ingress.fqdn}' : ''
