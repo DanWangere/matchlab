@@ -12,6 +12,10 @@ dependencies = []
 
 [project.optional-dependencies]
 eventhub = ["azure-eventhub>=5.11"]
+fabric = ["azure-kusto-data>=4.5", "azure-kusto-ingest>=4.5"]
+agents = ["openai>=1.50", "azure-identity>=1.17"]
+framework = ["agent-framework-openai>=1.20"]
+evals = ["azure-ai-evaluation>=1.10"]
 dev = ["pytest>=8"]
 
 [project.scripts]

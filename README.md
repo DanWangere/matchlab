@@ -34,6 +34,9 @@ matchlab fork data/matches/RAV-IRO-1000 --rollouts 200     # price the biggest c
 matchlab export                                            # flat JSONL for Eventhouse and Lakehouse
 matchlab play data/matches/RAV-IRO-1000 --speed 20         # the overlay at http://localhost:8080 with baseline and fork cues
 matchlab forkd --source file --match data/matches/RAV-IRO-1000 --hub http://localhost:8080 --mirror   # Otherwise, live
+matchlab forkd ... --agents foundry --out runs/forks.jsonl   # the agent team writes the ghosts' words (needs az login)
+matchlab explain data/matches/RAV-IRO-1000 --agents foundry  # one fork through Explainer, Localiser, Verifier
+matchlab recap runs/forks.jsonl --agents foundry             # full-time story from the forks that mattered
 python -m pytest
 ```
 
@@ -145,8 +148,11 @@ there; the real data stays out of the repo.
    league (the same 12 x 8 cells as the Eventhouse `ThreatGrid`), so candidates separate after
    about 100 rollouts, 0.5 s per fork. Inputs: Event Hub (live), Eventhouse (replay or `--follow`),
    file. Outputs: ghost cues to the hub, JSONL, `ForkRecords` and `Cues` in Eventhouse.
-5. **Foundry agents.** Explainer, Localiser (English, French, Spanish), Verifier, Recap, writing
-   only from fork records and ledger rows.
+5. **Foundry agents.** Done: `agents.py` and [`docs/agents.md`](docs/agents.md). Explainer and
+   Localiser on gpt-5.6-sol through the Foundry project (OpenAI client with Entra ID, or the
+   Microsoft Agent Framework), a deterministic Verifier that rejects any number or name not in the
+   fork record, Recap at full time, and `evals/groundedness.py` with Azure AI Evaluation. Template
+   text is the fallback, per language, so nothing unverified reaches the screen.
 6. **Undertow.** Pre-match ledger agent, windowed features in Eventstream, a state estimator
    scored against the truth files, KQL anomaly detection, Activator rules, Attributor agent,
    Real-Time Dashboard for the studio desk.

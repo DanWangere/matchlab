@@ -6,3 +6,6 @@ build/
 dist/
 data/
 .env
+runs/
+evals/_rows.jsonl
+evals/last_run.json

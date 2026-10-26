@@ -213,16 +213,42 @@ class Outputs:
     ingest: Optional[KustoIngest] = None
     quiet: bool = False
     cue_min_regret: float = 0.03
+    model: Any = None                 # a matchlab.agents ModelClient; None keeps template text
+    metas: Any = None                 # MetaStore, needed to build a Pipeline per match
     _file: Any = None
+    _pipelines: dict = field(default_factory=dict)
     sent: int = 0
     posted: int = 0
+    verified: int = 0
+    fallbacks: int = 0
 
     def __post_init__(self) -> None:
         if self.file_path:
             self._file = open(self.file_path, "a", encoding="utf-8")
 
+    def _pipeline(self, match_id: str) -> Any:
+        if self.model is None or self.metas is None:
+            return None
+        if match_id not in self._pipelines:
+            from .agents import Pipeline
+            meta = self.metas.get(match_id)
+            self._pipelines[match_id] = Pipeline(self.model, meta) if meta else None
+        return self._pipelines[match_id]
+
     def on_fork(self, record: dict[str, Any], cue: Cue) -> None:
         self.sent += 1
+        pipe = self._pipeline(record["match_id"])
+        if pipe is not None and (record["regret"] >= self.cue_min_regret or record["taken"]["type"] == "shot"):
+            cue, ex = pipe.cue(record)
+            record["explanation"] = {"text": ex.text, "text_analyst": ex.text_analyst, "verified": ex.verified,
+                                     "problems": ex.problems, "model_calls": ex.model_calls, "seconds": ex.seconds}
+            if ex.fallback:
+                self.fallbacks += 1
+            else:
+                self.verified += 1
+            if not self.quiet:
+                tag = "verified" if not ex.fallback else f"FALLBACK {ex.problems}"
+                print(f"         {tag} ({ex.seconds:.1f}s): {cue.text['en']}", file=sys.stderr)
         if not self.quiet:
             t, b = record["taken"], record["best_untaken"]
             alt = f"{b['type']}{' to ' + b['receiver_name'] if b and b.get('receiver_name') else ''}" if b else "-"

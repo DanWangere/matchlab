@@ -148,8 +148,13 @@ def cmd_forkd(a: argparse.Namespace) -> int:
         print("no matches in data/ to learn the threat grid from; run `matchlab generate` or pass --value goals", file=sys.stderr)
         return 2
     policy = ForkPolicy(rollouts=a.rollouts, horizon=a.horizon, min_gap_s=a.min_gap, max_per_match=a.max_forks)
-    outputs = Outputs(hub_url=a.hub, file_path=a.out, ingest=ingest, quiet=a.quiet, cue_min_regret=a.cue_min_regret)
-    service = ForkService(league, MetaStore(a.data, kql), grid, policy, outputs, hub_url=a.hub)
+    metas = MetaStore(a.data, kql)
+    model = None
+    if a.agents != "off":
+        from .agents import make_model
+        model = make_model(a.agents)
+    outputs = Outputs(hub_url=a.hub, file_path=a.out, ingest=ingest, quiet=a.quiet, cue_min_regret=a.cue_min_regret, model=model, metas=metas)
+    service = ForkService(league, metas, grid, policy, outputs, hub_url=a.hub)
     if a.source == "file":
         if not a.match:
             print("--match <path prefix> is required for the file source", file=sys.stderr)
@@ -170,7 +175,74 @@ def cmd_forkd(a: argparse.Namespace) -> int:
         summary = {"stopped": True, "matches": {m: {"forks": f.stats.forks, "mismatches": f.stats.mismatches} for m, f in service.followers.items()}}
     finally:
         outputs.close()
+    if model is not None:
+        summary["agents"] = {"kind": a.agents, "verified": outputs.verified, "fallbacks": outputs.fallbacks,
+                             "model_calls": getattr(model, "calls", None), "model_seconds": round(getattr(model, "seconds", 0.0), 1)}
     print(json.dumps(summary, indent=1), file=sys.stderr)
+    return 0
+
+
+def cmd_explain(a: argparse.Namespace) -> int:
+    """Run one fork through the agent team and print what each stage produced."""
+    from .agents import Pipeline, make_model
+
+    league = _load_league(a.league)
+    events, meta = _load_match(a.match)
+    if a.event_id is None:
+        shots = [e for e in action_events(events) if e.type == "shot"]
+        a.event_id = max(shots, key=lambda e: (e.xg or 0)).event_id
+    sim, ok = rebuild_to_event(league, meta, a.event_id)
+    if not ok:
+        print(f"event {a.event_id} is not forkable", file=sys.stderr)
+        return 1
+    from .forkd import load_grid
+    grid = load_grid(a.grid, a.data)
+    record = fork(sim, n_rollouts=a.rollouts, horizon=a.horizon, grid=grid)
+    model = make_model(a.agents)
+    pipe = Pipeline(model, meta)
+    cue, ex = pipe.cue(record)
+    print(f"{record['match_id']} minute {record['minute']}: {record['player_name']} {record['taken']['type']}, regret {record['regret']:+.3f}")
+    print(f"model: {a.agents}, calls {ex.model_calls}, {ex.seconds:.1f}s, verified {ex.verified}, source {cue.geometry.get('text_source')}")
+    if ex.problems:
+        print("problems:", json.dumps(ex.problems, ensure_ascii=False))
+    for lang in ("en", "fr", "es"):
+        print(f"  [{lang}] {cue.text[lang]}")
+        print(f"  [{lang}] {cue.text_analyst[lang]}")
+    if a.out:
+        with open(a.out, "w", encoding="utf-8") as f:
+            json.dump({"record": record, "cue": cue.to_dict(), "explanation": {"text": ex.text, "text_analyst": ex.text_analyst, "verified": ex.verified, "problems": ex.problems}}, f, indent=1, ensure_ascii=False)
+    return 0
+
+
+def cmd_recap(a: argparse.Namespace) -> int:
+    """Full-time recap from a forkd record file (the --out of forkd)."""
+    from .agents import Pipeline, make_model
+
+    records = []
+    with open(a.records, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                d = json.loads(line)
+                records.append(d["record"] if "record" in d else d)
+    if not records:
+        print("no records", file=sys.stderr)
+        return 1
+    match_id = records[0]["match_id"]
+    with open(os.path.join(a.data, "matches", f"{match_id}.meta.json"), encoding="utf-8") as f:
+        meta = json.load(f)
+    last = max(records, key=lambda r: r["event_id"])
+    score = last["score"]
+    if a.score:
+        h, s_ = a.score.split("-")
+        score = {"home": int(h), "away": int(s_)}
+    pipe = Pipeline(make_model(a.agents), meta)
+    out = pipe.recap(records, score, top=a.top)
+    print(f"{meta['home']['name']} {score['home']}-{score['away']} {meta['away']['name']}   verified {out['verified']}")
+    for lang in ("en", "fr", "es"):
+        print(f"\n[{lang}] {out['text'][lang]}")
+    if a.out:
+        with open(a.out, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=1, ensure_ascii=False)
     return 0
 
 
@@ -285,8 +357,31 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--consumer-group", default="$Default")
     s.add_argument("--from-start", action="store_true", help="eventhub: read from the beginning of retention instead of new events only")
     s.add_argument("--follow", action="store_true", help="eventhouse: keep polling for new rows")
+    s.add_argument("--agents", choices=["off", "fake", "foundry", "framework"], default="off",
+                   help="write the ghost text with the agent team: foundry (OpenAI client on the Foundry endpoint), framework (Microsoft Agent Framework), fake (offline)")
     s.add_argument("--quiet", action="store_true")
     s.set_defaults(fn=cmd_forkd)
+
+    s = sub.add_parser("explain", help="run one fork through Explainer, Localiser and Verifier and print the result")
+    s.add_argument("match", help="path prefix, e.g. data/matches/RAV-IRO-1000")
+    s.add_argument("--league", default="data/league.json")
+    s.add_argument("--data", default="data")
+    s.add_argument("--grid", default="data/threat_grid.json")
+    s.add_argument("--event-id", type=int, default=None)
+    s.add_argument("--rollouts", type=int, default=120)
+    s.add_argument("--horizon", type=int, default=20)
+    s.add_argument("--agents", choices=["fake", "foundry", "framework"], default="foundry")
+    s.add_argument("--out", default=None)
+    s.set_defaults(fn=cmd_explain)
+
+    s = sub.add_parser("recap", help="full-time recap from a forkd record file")
+    s.add_argument("records", help="the JSONL written by forkd --out")
+    s.add_argument("--data", default="data")
+    s.add_argument("--agents", choices=["fake", "foundry", "framework"], default="foundry")
+    s.add_argument("--top", type=int, default=5)
+    s.add_argument("--score", default=None, help="override the final score, e.g. 2-1")
+    s.add_argument("--out", default=None)
+    s.set_defaults(fn=cmd_recap)
 
     s = sub.add_parser("play", help="serve the renderer and replay a match with baseline and fork cues")
     s.add_argument("match", help="path prefix, e.g. data/matches/NBU-HAR-1000")
