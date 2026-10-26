@@ -3,11 +3,11 @@
 using 'main.bicep'
 
 param baseName = 'matchlab'
-param imageRef = 'ghcr.io/<owner>/matchlab:latest'   // a public image; or createRegistry=true + imageTag for an Azure registry
+param imageRef = 'ghcr.io/danwangere/matchlab:latest'   // a public image; or createRegistry=true + imageTag for an Azure registry
 param createRegistry = false
 param hubAlwaysOn = false                // true keeps one replica warm, about $0.05 an hour
 param forkdSource = 'eventhub'
-param eventHubName = ''                  // from the Eventstream custom endpoint destination matchlab-out
+param eventHubName = 'esehsech00w7983nk07czvx_eh'                  // from the Eventstream custom endpoint destination matchlab-out
 param eventHubConsumerGroup = '$Default'
 param forkdSchedule = ''                 // cron in UTC to start the fork job automatically, e.g. '0 14 * * 6'; empty = manual
 param kustoQueryUri = ''                 // https://<host>.kusto.fabric.microsoft.com
