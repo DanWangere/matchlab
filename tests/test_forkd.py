@@ -175,3 +175,15 @@ def test_fork_service_upgrades_cues_with_agents(league, matches, grid, tmp_path)
         assert all(r["record"]["explanation"]["verified"]["fr"] for r in rows)
     finally:
         server.shutdown()
+
+
+def test_one_match_stops_at_the_first_full_time(league, matches, grid):
+    """Two matches on one stream; with one_match the service returns after the first full time."""
+    (e1, m1), (e2, m2) = matches[0], matches[1]
+    metas = MetaStore("nowhere")
+    metas.cache = {m1["match_id"]: m1, m2["match_id"]: m2}
+    out = Outputs(quiet=True, cue_min_regret=-1.0)
+    svc = ForkService(league, metas, grid, ForkPolicy(rollouts=4, horizon=4, max_per_match=1), out)
+    summary = svc.run(iter(list(e1) + list(e2)), one_match=True)
+    out.close()
+    assert summary["events"] == len(e1) and list(summary["matches"]) == [m1["match_id"]]

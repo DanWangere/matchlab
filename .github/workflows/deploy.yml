@@ -1,14 +1,14 @@
-# Deploys the hub and the fork service to Azure Container Apps.
+# Builds the image and deploys the hub (scale-to-zero app) and the fork service (per-match job)
+# to Azure Container Apps. See docs/deploy.md for the one-time setup.
 #
-# One-time setup (see docs/deploy.md): a resource group, a federated credential for this repo on an
-# Entra app or managed identity with Contributor + User Access Administrator on that group, and
-# these repository secrets and variables:
 #   secrets:   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
 #              MATCHLAB_HUB_KEY, EVENTHUB_CONNECTION_STRING, EVENTHUB_NAME (the custom endpoint destination forkd reads),
-#              KUSTO_QUERY_URI, KUSTO_INGEST_URI (optional)
+#              KUSTO_QUERY_URI, KUSTO_INGEST_URI (optional),
+#              GHCR_PULL_TOKEN (optional: a token with read:packages, only if the image package stays private)
 #   variables: AZURE_RESOURCE_GROUP, AZURE_LOCATION, FOUNDRY_MODEL_ENDPOINT, FOUNDRY_DEPLOYMENT,
-#              FOUNDRY_ACCOUNT_NAME, FOUNDRY_RESOURCE_GROUP (optional), FORKD_SOURCE (optional), FORKD_MATCH (optional),
-#              COSMOS_ACCOUNT_NAME, COSMOS_RESOURCE_GROUP (optional; the replay store)
+#              FOUNDRY_ACCOUNT_NAME, FOUNDRY_RESOURCE_GROUP (optional), COSMOS_ACCOUNT_NAME, COSMOS_RESOURCE_GROUP (optional),
+#              FORKD_SOURCE (optional), FORKD_MATCH (optional), FORKD_SCHEDULE (optional cron),
+#              CONTAINER_REGISTRY = ghcr (default) | acr
 name: deploy
 
 on:
@@ -27,10 +27,15 @@ on:
         type: choice
         options: [foundry, framework, fake, "off"]
         default: foundry
+      hub_always_on:
+        description: "Keep one hub replica warm (about $0.05 an hour)"
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
   contents: read
+  packages: write
 
 concurrency: deploy
 
@@ -40,8 +45,33 @@ jobs:
     env:
       RG: ${{ vars.AZURE_RESOURCE_GROUP || 'rg-matchlab' }}
       LOCATION: ${{ vars.AZURE_LOCATION || 'swedencentral' }}
+      REGISTRY_KIND: ${{ vars.CONTAINER_REGISTRY || 'ghcr' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Image name
+        id: img
+        run: |
+          echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "ghcr=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/matchlab" >> "$GITHUB_OUTPUT"
+
+      # ---- image on GitHub's registry (default: no Azure registry, no standing cost)
+      - uses: docker/login-action@v3
+        if: env.REGISTRY_KIND == 'ghcr'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        if: env.REGISTRY_KIND == 'ghcr'
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.img.outputs.ghcr }}:${{ steps.img.outputs.tag }}
+            ${{ steps.img.outputs.ghcr }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - uses: azure/login@v2
         with:
@@ -52,26 +82,34 @@ jobs:
       - name: Resource group
         run: az group create -n "$RG" -l "$LOCATION" -o none
 
-      - name: Phase 1, registry, identity, environment
+      # ---- image on an Azure Container Registry (CONTAINER_REGISTRY=acr): create it, then build into it
+      - name: Registry and base resources (acr)
+        if: env.REGISTRY_KIND == 'acr'
         id: base
         run: |
           az deployment group create -g "$RG" -n matchlab-base -f infra/main.bicep \
-            -p hubKey="${{ secrets.MATCHLAB_HUB_KEY }}" -o none
-          echo "registry=$(az deployment group show -g "$RG" -n matchlab-base --query properties.outputs.registryLoginServer.value -o tsv)" >> "$GITHUB_OUTPUT"
+            -p createRegistry=true hubKey="${{ secrets.MATCHLAB_HUB_KEY }}" -o none
+          REGISTRY=$(az deployment group show -g "$RG" -n matchlab-base --query properties.outputs.registryLoginServer.value -o tsv)
+          az acr build --registry "${REGISTRY%%.*}" --image "matchlab:${{ steps.img.outputs.tag }}" --file Dockerfile . -o none
 
-      - name: Build and push the image
-        run: |
-          REGISTRY="${{ steps.base.outputs.registry }}"
-          az acr build --registry "${REGISTRY%%.*}" --image "matchlab:${GITHUB_SHA::12}" --file Dockerfile . -o none
-
-      - name: Phase 2, the apps
+      - name: Deploy
         id: apps
         run: |
+          if [ "$REGISTRY_KIND" = "acr" ]; then
+            IMAGE_ARGS="createRegistry=true imageTag=${{ steps.img.outputs.tag }}"
+          else
+            IMAGE_ARGS="imageRef=${{ steps.img.outputs.ghcr }}:${{ steps.img.outputs.tag }}"
+            if [ -n "${{ secrets.GHCR_PULL_TOKEN }}" ]; then
+              IMAGE_ARGS="$IMAGE_ARGS registryUsername=${{ github.actor }} registryPassword=${{ secrets.GHCR_PULL_TOKEN }}"
+            fi
+          fi
           az deployment group create -g "$RG" -n matchlab-apps -f infra/main.bicep \
-            -p imageTag="${GITHUB_SHA::12}" \
+            -p $IMAGE_ARGS \
                hubKey="${{ secrets.MATCHLAB_HUB_KEY }}" \
+               hubAlwaysOn=${{ inputs.hub_always_on || false }} \
                forkdSource="${{ inputs.source || vars.FORKD_SOURCE || 'eventhub' }}" \
                forkdMatch="${{ inputs.match || vars.FORKD_MATCH || '' }}" \
+               forkdSchedule="${{ vars.FORKD_SCHEDULE || '' }}" \
                agents="${{ inputs.agents || 'foundry' }}" \
                eventHubConnectionString="${{ secrets.EVENTHUB_CONNECTION_STRING }}" \
                eventHubName="${{ secrets.EVENTHUB_NAME }}" \
@@ -86,10 +124,11 @@ jobs:
             -o none
           echo "hub=$(az deployment group show -g "$RG" -n matchlab-apps --query properties.outputs.hubUrl.value -o tsv)" >> "$GITHUB_OUTPUT"
           echo "principal=$(az deployment group show -g "$RG" -n matchlab-apps --query properties.outputs.identityPrincipalId.value -o tsv)" >> "$GITHUB_OUTPUT"
+          echo "job=$(az deployment group show -g "$RG" -n matchlab-apps --query properties.outputs.forkJobName.value -o tsv)" >> "$GITHUB_OUTPUT"
 
-      - name: Smoke test
+      - name: Smoke test (wakes the hub)
         run: |
-          for i in $(seq 1 20); do
+          for i in $(seq 1 30); do
             if curl -fsS "${{ steps.apps.outputs.hub }}/healthz"; then exit 0; fi
             sleep 10
           done
@@ -99,7 +138,7 @@ jobs:
         run: |
           {
             echo "## matchlab"
-            echo "- overlay: ${{ steps.apps.outputs.hub }}"
-            echo "- fork service identity (principal id): \`${{ steps.apps.outputs.principal }}\`"
-            echo "- add that identity to the Fabric workspace (Contributor) for Eventhouse reads and ingestion"
+            echo "- overlay: ${{ steps.apps.outputs.hub }}  (sleeps when idle; the first visit wakes it)"
+            echo "- fork job: \`az containerapp job start -n ${{ steps.apps.outputs.job }} -g $RG\` before kick-off, or the matchday workflow"
+            echo "- services identity (principal id): \`${{ steps.apps.outputs.principal }}\`; add it to the Fabric workspace as Contributor"
           } >> "$GITHUB_STEP_SUMMARY"

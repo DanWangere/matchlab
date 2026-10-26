@@ -412,7 +412,9 @@ class ForkService:
         self.followers[match_id] = f
         return f
 
-    def run(self, events: Iterable[Event], mirror_events_to_hub: bool = False) -> dict[str, Any]:
+    def run(self, events: Iterable[Event], mirror_events_to_hub: bool = False, one_match: bool = False) -> dict[str, Any]:
+        """Consume the stream. With one_match, return at the first match's full time, so a job (a
+        Container Apps job, a cron) can run per fixture and bill only while the match is on."""
         t0 = time.time()
         n = 0
         for ev in events:
@@ -427,6 +429,9 @@ class ForkService:
                     pass
             self.outputs.on_event(ev)
             f.on_event(ev)
+            if one_match and f.done:
+                print(f"full time in {ev.match_id}; one match asked for, stopping", file=sys.stderr)
+                break
         summary = {"events": n, "seconds": round(time.time() - t0, 1), "matches": {}}
         for mid, f in self.followers.items():
             summary["matches"][mid] = {"events": f.stats.events_seen, "mismatches": f.stats.mismatches, "forks": f.stats.forks,

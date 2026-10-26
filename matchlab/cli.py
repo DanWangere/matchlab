@@ -182,7 +182,7 @@ def cmd_forkd(a: argparse.Namespace) -> int:
     print(f"forkd: source={a.source} value={a.value} rollouts={a.rollouts} horizon={a.horizon}"
           f"{' hub=' + a.hub if a.hub else ''}{' ingest=on' if ingest else ''}{' store=' + store.endpoint if store else ''}", file=sys.stderr)
     try:
-        summary = service.run(events, mirror_events_to_hub=a.mirror)
+        summary = service.run(events, mirror_events_to_hub=a.mirror, one_match=a.one_match)
     except KeyboardInterrupt:
         summary = {"stopped": True, "matches": {m: {"forks": f.stats.forks, "mismatches": f.stats.mismatches} for m, f in service.followers.items()}}
     finally:
@@ -421,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="write the ghost text with the agent team: foundry (OpenAI client on the Foundry endpoint), framework (Microsoft Agent Framework), fake (offline)")
     s.add_argument("--sync-agents", action="store_true", help="wait for the model before continuing (default: the ghost posts at once with template words and is upgraded in place)")
     s.add_argument("--quiet", action="store_true")
+    s.add_argument("--one-match", action="store_true", help="exit at the first match's full time (for a per-fixture job)")
     s.add_argument("--store", action=argparse.BooleanOptionalAction, default=bool(os.environ.get("COSMOS_ENDPOINT")),
                    help="write the match, its events and its final cues to Cosmos DB for replay (default: on when COSMOS_ENDPOINT is set)")
     s.set_defaults(fn=cmd_forkd)

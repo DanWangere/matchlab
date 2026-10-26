@@ -1,25 +1,46 @@
 # Deploying matchlab
 
-Two services, one image, on Azure Container Apps:
+Two services, one image, on Azure Container Apps, shaped so that nothing costs anything while no
+match is on:
 
-| App | Command | Ingress | Talks to |
+| Piece | Runs as | When it runs | Talks to |
 | --- | --- | --- | --- |
-| `matchlab-hub` | `matchlab serve` | public HTTPS (the overlay, `/stream`, `/state`, `/healthz`) | nothing; it is written to by forkd |
-| `matchlab-forkd` | `matchlab forkd --source eventhub \| eventhouse ... --agents foundry` | none | the Eventstream custom endpoint or the Eventhouse, the Foundry model, the hub |
+| `matchlab-hub` | Container App, `matchlab serve`, public HTTPS | scales to zero after ~5 idle minutes; the first request wakes it in a few seconds | written to by the fork job; read by viewers over SSE; Cosmos DB for replays |
+| `matchlab-forkd` | Container Apps **job**, `matchlab forkd ... --one-match` | one execution per match, started by hand, by the `matchday` workflow or by a cron; exits at full time | the Eventstream destination or the Eventhouse, the Foundry model, the hub, Cosmos DB |
 
-Fabric (Eventstream, Eventhouse, the dashboard) and the Foundry project are not created by the
-template; `fabric/README.md` and `docs/agents.md` set those up. The template creates a user-assigned
-identity that signs in to both without keys, plus a registry, a Log Analytics workspace and the
-Container Apps environment. `infra/main.bicep` is the whole of it.
+`infra/main.bicep` is the whole template: the environment, a Log Analytics workspace, one
+user-assigned identity, the hub app and the fork job. It references, but does not create, the Fabric
+items (`fabric/README.md`), the Foundry project (`docs/agents.md`) and the Cosmos DB account (below).
+The image lives on GitHub's registry by default, so there is no Azure registry to pay for; set the
+repository variable `CONTAINER_REGISTRY=acr` to build into an Azure Container Registry instead.
+
+## What it costs
+
+Consumption pricing is per vCPU-second and GiB-second while a replica exists, with a monthly free
+grant of 180,000 vCPU-seconds and 360,000 GiB-seconds per subscription, and no charge for the
+environment itself.
+
+| | |
+| --- | --- |
+| hub awake (0.5 vCPU, 1 GiB) | about $0.05 an hour, idle rate lower |
+| hub asleep | $0 |
+| fork job, one real-time match (1 vCPU, 2 GiB, ~100 min) | about $0.18 |
+| fork job, a match streamed at 10x (~10 min) | about $0.02 |
+| Log Analytics, Cosmos DB free tier, GitHub registry (public image) | $0 |
+| Azure Container Registry, if chosen | about $5 a month, the only standing charge |
+
+A demo week stays inside the free grant. `az group delete -n <rg>` removes the Container Apps
+pieces; Fabric, Foundry and Cosmos DB are untouched.
 
 ## What the hub is, and is not
 
 The hub keeps the current match's metadata, cues and recent events in memory and fans them out
-over server-sent events. One replica serves a studio and a few hundred viewers; it is not a CDN.
-Its three write routes (`POST /events`, `/cues`, `/meta`) are guarded by `MATCHLAB_HUB_KEY`
-(header `X-Hub-Key`); reads are open because the overlay is meant to be watched. To scale beyond
-one replica, put Web PubSub behind the same three routes and Cosmos DB behind `/state`; nothing
-upstream changes.
+over server-sent events. One replica serves a studio and a few hundred viewers. Its write routes
+(`POST /events`, `/cues`, `/meta`) are guarded by `MATCHLAB_HUB_KEY` (header `X-Hub-Key`); reads are
+open because the overlay is meant to be watched. Scaling to zero drops the in-memory state, which is
+fine: a live match re-posts it and replays come from Cosmos DB. `hubAlwaysOn=true` keeps one replica
+warm if the cold start bothers you. To go beyond one replica, put Web PubSub behind the same three
+routes and Cosmos DB behind `/state`; nothing upstream changes.
 
 ## The replay store
 
@@ -45,32 +66,47 @@ of a role, for an emulator or a throwaway account.
 
 ## Deploy from GitHub Actions
 
-1. **Resource group and OIDC.** Create an app registration (or a user-assigned identity) with a
-   federated credential for `repo:<owner>/matchlab:ref:refs/heads/main` and
-   `repo:<owner>/matchlab:environment:` (or whatever ref you run the workflow from), and give it
-   Contributor and User Access Administrator on the resource group (the template assigns roles).
+1. **OIDC.** Create an app registration (or a user-assigned identity) with a federated credential
+   for this repository (`repo:<owner>/matchlab:ref:refs/heads/main`, or the branch you run from) and
+   give it Contributor and User Access Administrator on the resource group; the template assigns the
+   registry, Foundry and Cosmos DB roles itself, so it also needs Contributor on the groups holding
+   the Foundry account and the Cosmos DB account when those differ.
 2. **Repository secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
    `MATCHLAB_HUB_KEY` (any long random string), `EVENTHUB_CONNECTION_STRING` and `EVENTHUB_NAME`
-   (from the Eventstream custom endpoint **destination** `matchlab-out`, SAS Key Authentication; the
-   fork service reads the stream, it does not send to it), `KUSTO_QUERY_URI`
-   (the KQL database's Query URI) and, to write fork records back, `KUSTO_INGEST_URI` (the same host
-   with `ingest-` in front).
+   (from the Eventstream custom endpoint **destination** `matchlab-out`; the fork service reads the
+   stream, it does not send to it), `KUSTO_QUERY_URI` and, to write fork records back,
+   `KUSTO_INGEST_URI`.
 3. **Repository variables:** `AZURE_RESOURCE_GROUP`, `AZURE_LOCATION`, `FOUNDRY_MODEL_ENDPOINT`
    (`https://<account>.services.ai.azure.com/openai/v1`), `FOUNDRY_DEPLOYMENT`,
-   `FOUNDRY_ACCOUNT_NAME` and `FOUNDRY_RESOURCE_GROUP` (so the identity gets the Azure AI User role
-   on the account; leave the name empty to assign it by hand), `COSMOS_ACCOUNT_NAME` and
-   `COSMOS_RESOURCE_GROUP` for the replay store (leave empty for no replay).
-4. **Run the `deploy` workflow** (Actions, deploy, Run workflow). It deploys the base resources,
-   builds the image in the registry with `az acr build`, deploys the two apps, and waits for
-   `/healthz`. The run summary prints the overlay URL and the identity's principal id.
-5. **Give the identity access to Fabric.** In the Fabric workspace, Manage access, add the identity
-   (search by the principal id or the name `id-matchlab`) as Contributor. The tenant setting
-   "Service principals can use Fabric APIs" must be on for that workspace. Without this the
-   Eventhouse source and `--ingest` fail with 401; the Event Hub source still works because it uses
-   the connection string.
-6. **Consumer group.** forkd reads the destination on `$Default` unless `eventHubConsumerGroup`
-   names one you added in the destination's settings. Or deploy with `source: eventhouse` and a
-   match id to replay from the table.
+   `FOUNDRY_ACCOUNT_NAME`, `COSMOS_ACCOUNT_NAME`; `FOUNDRY_RESOURCE_GROUP` and
+   `COSMOS_RESOURCE_GROUP` only when they differ from the deployment group; `FORKD_SCHEDULE` (a cron
+   in UTC) if the fork job should start itself.
+4. **Image visibility.** The workflow pushes `ghcr.io/<owner>/matchlab`. Container Apps pulls it
+   without credentials when the package is public: after the first run, open the package on GitHub
+   (Packages, matchlab, Package settings) and set visibility to Public. To keep it private instead,
+   add the secret `GHCR_PULL_TOKEN` (a token with `read:packages`) and the workflow passes it to the
+   apps.
+5. **Run the `deploy` workflow** (Actions, deploy, Run workflow). It builds the image, deploys, and
+   waits for `/healthz` (which also wakes the hub once). The run summary prints the overlay URL, the
+   job name and the identity's principal id.
+6. **Give the identity access to Fabric.** In the Fabric workspace, Manage access, add `id-matchlab`
+   as Contributor. The tenant setting "Service principals can use Fabric APIs" must be on for that
+   workspace. Without this the Eventhouse source and `--ingest` fail with 401; the Event Hub source
+   still works because it uses the connection string.
+
+## Match day
+
+The `matchday` workflow has five buttons: **kickoff** starts one fork-job execution (it follows the
+next match on the stream and exits at full time), **status** lists executions and the hub's state,
+**stop** ends a running execution, **hub-off** and **hub-on** stop and start the hub entirely (a
+stopped hub does not wake on requests; with scale-to-zero you rarely need it). The same from a
+terminal:
+
+```bash
+az containerapp job start -n matchlab-forkd -g <rg>                       # before kick-off
+az containerapp job execution list -n matchlab-forkd -g <rg> -o table      # what ran, when
+az containerapp logs show -n matchlab-hub -g <rg> --follow                # the hub's log
+```
 
 Then stream a match from anywhere:
 
@@ -78,25 +114,22 @@ Then stream a match from anywhere:
 matchlab stream data/matches/RAV-IRO-1000 --speed 10 --sink eventhub --batch 20 --live-ts
 ```
 
-and open the overlay URL. Ghosts appear a few seconds after each fork-worthy decision; the words on
-them are upgraded in place when the agent team's text verifies.
+and open the overlay URL. Ghosts appear a few seconds after each fork-worthy decision, the words on
+them are upgraded in place when the agent team's text verifies, and at full time the match is in the
+replay picker.
 
 ## Deploy from a laptop
 
-The same two phases with the CLI:
+With a public image already on ghcr.io (the workflow's, or your own `docker push`):
 
 ```bash
-az group create -n rg-matchlab -l swedencentral
-export HUB_KEY=$(openssl rand -hex 24) EVENTHUB_CONNECTION_STRING='...'
-az deployment group create -g rg-matchlab -f infra/main.bicep -p hubKey="$HUB_KEY"
-REGISTRY=$(az deployment group show -g rg-matchlab -n main --query properties.outputs.registryLoginServer.value -o tsv)
-az acr build --registry "${REGISTRY%%.*}" --image matchlab:local --file Dockerfile .
-az deployment group create -g rg-matchlab -f infra/main.bicep -p infra/main.bicepparam -p imageTag=local
-az deployment group show -g rg-matchlab -n main --query properties.outputs.hubUrl.value -o tsv
+export HUB_KEY=$(openssl rand -hex 24) EVENTHUB_READ_CONNECTION_STRING='...'
+az bicep build -f infra/main.bicep                                       # checks the template
+az deployment group create -g rg-ai-garage-global -f infra/main.bicep -p infra/main.bicepparam
+az deployment group show -g rg-ai-garage-global -n main --query properties.outputs.hubUrl.value -o tsv
 ```
 
-`infra/main.bicepparam` holds the non-secret values; edit it first. `az bicep build -f infra/main.bicep`
-checks the template without deploying.
+`infra/main.bicepparam` holds the non-secret values; edit `imageRef` and the account names first.
 
 ## Run the image locally
 
@@ -111,9 +144,3 @@ The image carries the league, forty matches' metadata and the learned threat gri
 build args `LEAGUE_SEED`, `MATCHES`, `MATCH_SEED` must match what was streamed into the Eventhouse);
 the hidden truth files are left out. Signed-in access from a container uses `AZURE_CLIENT_ID` /
 `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET` for an app, or the managed identity in Azure.
-
-## Cost and teardown
-
-Basic registry, a consumption Container Apps environment with two single-replica apps (0.5 and
-1 vCPU) and 30-day logs: a few dollars a day while running. `az group delete -n rg-matchlab` removes
-all of it; Fabric and Foundry are untouched.

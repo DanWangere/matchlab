@@ -1,10 +1,12 @@
-// matchlab on Azure Container Apps: the cue hub (renderer + SSE) and the Otherwise fork service,
-// one image, one user-assigned identity. Fabric (Eventstream, Eventhouse) and the Foundry project
-// are not created here; they are existing resources the fork service signs in to with that identity.
+// matchlab on Azure Container Apps, sized to cost nothing while nothing is happening:
+//   - the hub (overlay + SSE) scales to zero after five idle minutes and wakes on the first request;
+//   - the fork service is a Container Apps *job*, started per match (by hand, a workflow button or a
+//     cron), that follows one match with `--one-match` and exits at full time.
+// Fabric (Eventstream, Eventhouse), the Foundry project and the Cosmos DB account are existing
+// resources the services sign in to with one user-assigned identity.
 //
-// Two-phase deploy (see .github/workflows/deploy.yml): first without imageTag, which creates the
-// registry, identity and environment; then build and push the image; then again with imageTag,
-// which creates the two apps.
+// The image comes from a public registry by default (GitHub's ghcr.io, built by the deploy workflow),
+// which has no standing cost; set createRegistry=true to build into an Azure Container Registry instead.
 
 targetScope = 'resourceGroup'
 
@@ -16,14 +18,27 @@ param location string = resourceGroup().location
 @maxLength(12)
 param baseName string = 'matchlab'
 
-@description('Image tag in the registry; empty on the first phase (no apps yet).')
+@description('Full image reference to run, e.g. ghcr.io/<owner>/matchlab:abc123. Empty on the first phase when createRegistry is true.')
+param imageRef string = ''
+
+@description('Create an Azure Container Registry and pull from it with the identity (then imageRef is <registry>/<baseName>:<imageTag>).')
+param createRegistry bool = false
+
+@description('Image tag in the created registry (createRegistry only).')
 param imageTag string = ''
 
-@description('Write key for the hub (POST /events, /cues, /meta). Readers need none. Required: Container Apps rejects an empty secret.')
+@description('Username for a private image registry (empty for a public image).')
+param registryUsername string = ''
+
+@description('Password or token for that registry.')
+@secure()
+param registryPassword string = ''
+
+@description('Write key for the hub (POST /events, /cues, /meta). Readers need none. Container Apps rejects an empty secret, so it is required.')
 @secure()
 param hubKey string
 
-@description('Where the fork service reads the match from: the Eventstream custom endpoint (live) or the Eventhouse table (replay / follow).')
+@description('Where the fork service reads the match from: the Eventstream custom endpoint destination (live) or the Eventhouse table (replay / follow).')
 @allowed(['eventhub', 'eventhouse'])
 param forkdSource string = 'eventhub'
 
@@ -49,6 +64,12 @@ param kustoDatabase string = 'matchlab'
 @description('Match id to replay when forkdSource is eventhouse.')
 param forkdMatch string = ''
 
+@description('Cron (5 fields, UTC) to start the fork job on a schedule, e.g. "0 14 * * 6"; empty means manual start only.')
+param forkdSchedule string = ''
+
+@description('Longest a fork job may run, in seconds (a real-time match plus stoppage is about 7000).')
+param forkdTimeoutSeconds int = 9000
+
 @description('Agent team: foundry (gpt model through the Foundry project), framework (same, via Microsoft Agent Framework), fake, or off.')
 @allowed(['foundry', 'framework', 'fake', 'off'])
 param agents string = 'foundry'
@@ -65,19 +86,24 @@ param foundryAccountName string = ''
 @description('Resource group of that Foundry account (defaults to this one).')
 param foundryResourceGroup string = resourceGroup().name
 
-@description('Rollouts per fork; 120 is about 0.5 s per fork on one vCPU.')
-param rollouts int = 120
-
 @description('Name of an existing Cosmos DB for NoSQL account for the replay store; empty leaves replay off.')
 param cosmosAccountName string = ''
 
 @description('Resource group of that account (defaults to this one).')
 param cosmosResourceGroup string = resourceGroup().name
 
+@description('Rollouts per fork; 120 is about 0.5 s per fork on one vCPU.')
+param rollouts int = 120
+
+@description('Keep one hub replica warm (minReplicas 1) instead of scaling to zero. Costs about $0.05 an hour.')
+param hubAlwaysOn bool = false
+
 var registryName = toLower(replace('${baseName}acr${uniqueString(resourceGroup().id)}', '-', ''))
-var deployApps = !empty(imageTag)
-var image = '${registry.properties.loginServer}/${baseName}:${imageTag}'
+var image = createRegistry ? (empty(imageTag) ? '' : '${registry.properties.loginServer}/${baseName}:${imageTag}') : imageRef
+var deployApps = !empty(image)
 var acrPullRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+var registryServer = createRegistry ? registry.properties.loginServer : (empty(imageRef) ? '' : split(imageRef, '/')[0])
+var privateRegistry = !createRegistry && !empty(registryPassword)
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-${baseName}'
@@ -93,15 +119,15 @@ resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   }
 }
 
-resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
+resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = if (createRegistry) {
   name: registryName
   location: location
   sku: { name: 'Basic' }
   properties: { adminUserEnabled: false }
 }
 
-resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(registry.id, identity.id, acrPullRole)
+resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createRegistry) {
+  name: guid(resourceGroup().id, registryName, identity.id, acrPullRole)
   scope: registry
   properties: {
     roleDefinitionId: acrPullRole
@@ -142,14 +168,23 @@ module cosmos 'cosmos.bicep' = if (!empty(cosmosAccountName)) {
   }
 }
 
-var cosmosEndpoint = empty(cosmosAccountName) ? '' : cosmos.outputs.endpoint
+var cosmosEndpoint = empty(cosmosAccountName) ? '' : cosmos!.outputs.endpoint
 var cosmosEnv = [
   { name: 'COSMOS_ENDPOINT', value: cosmosEndpoint }
   { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
 ]
 
-// The hub keeps cues and recent events in memory and fans them out over SSE, so it runs as one
-// replica. Swap in Web PubSub + Cosmos DB behind the same three POST routes to scale out.
+// How the apps pull the image: the identity for a created registry, a username/password for a
+// private public-cloud registry, nothing for a public image.
+var registries = createRegistry ? [
+  { server: registryServer, identity: identity.id }
+] : privateRegistry ? [
+  { server: registryServer, username: registryUsername, passwordSecretRef: 'registry-password' }
+] : []
+var registrySecrets = privateRegistry ? [{ name: 'registry-password', value: registryPassword }] : []
+
+// The hub keeps the current match in memory and fans it out over SSE. At zero replicas it costs
+// nothing; the first request (a viewer, or the fork job posting an event) wakes it in a few seconds.
 resource hub 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
   name: '${baseName}-hub'
   location: location
@@ -166,12 +201,8 @@ resource hub 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
         transport: 'http'
         allowInsecure: false
       }
-      registries: [
-        { server: registry.properties.loginServer, identity: identity.id }
-      ]
-      secrets: [
-        { name: 'hub-key', value: hubKey }
-      ]
+      registries: registries
+      secrets: concat([{ name: 'hub-key', value: hubKey }], registrySecrets)
     }
     template: {
       containers: [
@@ -189,15 +220,38 @@ resource hub 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
           ]
         }
       ]
-      scale: { minReplicas: 1, maxReplicas: 1 }
+      scale: {
+        minReplicas: hubAlwaysOn ? 1 : 0
+        maxReplicas: 1
+        rules: [
+          { name: 'http', http: { metadata: { concurrentRequests: '200' } } }
+        ]
+      }
     }
   }
   dependsOn: [acrPull]
 }
 
+// Bicep arrays are newline-separated: no commas at line ends inside the brackets.
+var forkdBaseArgs = [
+  'matchlab'
+  'forkd'
+  '--source'
+  forkdSource
+  '--hub'
+  'http://${baseName}-hub'
+  '--mirror'
+  '--agents'
+  agents
+  '--rollouts'
+  string(rollouts)
+  '--out'
+  '/tmp/runs/forks.jsonl'
+  '--quiet'
+  '--one-match'
+]
 var forkdArgs = concat(
-  ['matchlab', 'forkd', '--source', forkdSource, '--hub', 'http://${baseName}-hub', '--mirror', '--agents', agents,
-   '--rollouts', string(rollouts), '--out', '/tmp/runs/forks.jsonl', '--quiet'],
+  forkdBaseArgs,
   forkdSource == 'eventhub' ? ['--consumer-group', eventHubConsumerGroup] : ['--match', forkdMatch, '--follow'],
   empty(kustoIngestUri) ? [] : ['--ingest']
 )
@@ -205,14 +259,16 @@ var forkdArgs = concat(
 // Container Apps rejects empty secret values, so the Event Hub secret exists only when a string was given.
 var forkdSecrets = concat(
   [{ name: 'hub-key', value: hubKey }],
-  empty(eventHubConnectionString) ? [] : [{ name: 'eventhub-cs', value: eventHubConnectionString }]
+  empty(eventHubConnectionString) ? [] : [{ name: 'eventhub-cs', value: eventHubConnectionString }],
+  registrySecrets
 )
 var forkdEnv = concat(
   [{ name: 'MATCHLAB_HUB_KEY', secretRef: 'hub-key' }],
   empty(eventHubConnectionString) ? [] : [{ name: 'EVENTHUB_CONNECTION_STRING', secretRef: 'eventhub-cs' }]
 )
 
-resource forkd 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
+// The fork service runs as a job: one execution per match, exiting at full time, billed only while it runs.
+resource forkd 'Microsoft.App/jobs@2024-03-01' = if (deployApps) {
   name: '${baseName}-forkd'
   location: location
   identity: {
@@ -220,11 +276,14 @@ resource forkd 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
     userAssignedIdentities: { '${identity.id}': {} }
   }
   properties: {
-    managedEnvironmentId: env.id
+    environmentId: env.id
     configuration: {
-      registries: [
-        { server: registry.properties.loginServer, identity: identity.id }
-      ]
+      triggerType: empty(forkdSchedule) ? 'Manual' : 'Schedule'
+      replicaTimeout: forkdTimeoutSeconds
+      replicaRetryLimit: 0
+      manualTriggerConfig: empty(forkdSchedule) ? { parallelism: 1, replicaCompletionCount: 1 } : null
+      scheduleTriggerConfig: empty(forkdSchedule) ? null : { cronExpression: forkdSchedule, parallelism: 1, replicaCompletionCount: 1 }
+      registries: registries
       secrets: forkdSecrets
     }
     template: {
@@ -244,14 +303,14 @@ resource forkd 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
           ], cosmosEnv)
         }
       ]
-      scale: { minReplicas: 1, maxReplicas: 1 }
     }
   }
   dependsOn: [acrPull, hub]
 }
 
-output registryLoginServer string = registry.properties.loginServer
+output registryLoginServer string = createRegistry ? registry.properties.loginServer : ''
 output identityPrincipalId string = identity.properties.principalId
 output identityClientId string = identity.properties.clientId
-output hubUrl string = deployApps ? 'https://${hub.properties.configuration.ingress.fqdn}' : ''
+output hubUrl string = deployApps ? 'https://${hub!.properties.configuration.ingress.fqdn}' : ''
+output forkJobName string = deployApps ? '${baseName}-forkd' : ''
 output cosmosEndpoint string = cosmosEndpoint

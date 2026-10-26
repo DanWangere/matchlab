@@ -1,0 +1,61 @@
+# Match-day switches for the deployed services. Nothing here costs anything until "kickoff":
+# the hub sleeps at zero replicas and the fork service is a job that only runs while started.
+name: matchday
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        type: choice
+        options: [kickoff, status, stop, hub-off, hub-on]
+        default: status
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  matchday:
+    runs-on: ubuntu-latest
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP || 'rg-matchlab' }}
+      HUB: matchlab-hub
+      JOB: matchlab-forkd
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: kickoff, start one fork-service execution for the next match
+        if: inputs.action == 'kickoff'
+        run: |
+          az containerapp job start -n "$JOB" -g "$RG" -o table
+          URL=$(az containerapp show -n "$HUB" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)
+          echo "overlay: https://$URL" >> "$GITHUB_STEP_SUMMARY"
+          curl -fsS "https://$URL/healthz" || true
+
+      - name: status
+        if: inputs.action == 'status'
+        run: |
+          echo "## fork job executions" >> "$GITHUB_STEP_SUMMARY"
+          az containerapp job execution list -n "$JOB" -g "$RG" --query "[].{name:name,status:properties.status,start:properties.startTime,end:properties.endTime}" -o table | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "## hub" >> "$GITHUB_STEP_SUMMARY"
+          az containerapp show -n "$HUB" -g "$RG" --query "{running:properties.runningStatus,fqdn:properties.configuration.ingress.fqdn,replicas:properties.template.scale}" -o yaml | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: stop, end any running fork-service execution
+        if: inputs.action == 'stop'
+        run: |
+          for e in $(az containerapp job execution list -n "$JOB" -g "$RG" --query "[?properties.status=='Running'].name" -o tsv); do
+            az containerapp job stop -n "$JOB" -g "$RG" --job-execution-name "$e" -o none && echo "stopped $e"
+          done
+
+      - name: hub-off, stop the hub entirely (it no longer wakes on requests)
+        if: inputs.action == 'hub-off'
+        run: az containerapp stop -n "$HUB" -g "$RG" -o none && echo "hub stopped"
+
+      - name: hub-on, start it again
+        if: inputs.action == 'hub-on'
+        run: az containerapp start -n "$HUB" -g "$RG" -o none && echo "hub started"

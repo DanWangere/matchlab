@@ -41,7 +41,7 @@ functions) and the studio dashboard; fork records and cues are written back to t
                                              │ custom endpoint           │ ForkRecords, Cues … │
                                              ▼ destination "matchlab-out"│ 15 KQL functions    │
  ┌────────────────────────────────────────────────────────────┐          │ Real-Time Dashboard │
- │ matchlab forkd  (Azure Container Apps)                     │ ◀──────▶ │ "matchlab-studio"   │
+ │ matchlab forkd  (Container Apps job, one run per match)    │ ◀──────▶ │ "matchlab-studio"   │
  │  Follower: deterministic twin of the match                 │ replay / └─────────────────────┘
  │  ForkPolicy → snapshot, rollout alternatives, restore      │ ingest
  │  ThreatGrid value → fork record (taken, best untaken,      │
@@ -52,7 +52,7 @@ functions) and the studio dashboard; fork records and cues are written back to t
         │ meta, events per   │ POST /events /cues /meta  (X-Hub-Key)     └─────────────────────┘
         │ minute, final cues ▼
         │          ┌────────────────────────────────────────────────────────────┐
-        │          │ matchlab serve  (Azure Container Apps, public)             │  SSE /stream   ┌──────────────┐
+        │          │ matchlab serve  (Container Apps, public, scales to zero)   │  SSE /stream   ┌──────────────┐
         ▼          │  cue hub: match state in memory, fan-out over SSE          │ ─────────────▶ │ renderer/    │
  ┌──────────────┐  │  renderer/index.html: 2D pitch, ghosts, lower thirds,      │                │ index.html   │
  │ Cosmos DB    │  │  Analyst / Casual / Club / Player modes, EN / FR / ES       │                │ (browser)    │
@@ -73,7 +73,7 @@ pip install -e ".[dev]"           # the core is stdlib only; extras: eventhub, f
 matchlab league --seed 7                                   # 20 clubs, 360 players
 matchlab generate --matches 40 --seed 1                    # matches + hidden truth into data/
 matchlab play data/matches/RAV-IRO-1000 --speed 20         # the overlay at http://localhost:8080, forks precomputed
-python -m pytest                                           # 36 tests
+python -m pytest                                           # 37 tests
 ```
 
 The live shape, three terminals (`.env` holds the Event Hub keys, the Eventhouse URIs and the hub
@@ -106,7 +106,7 @@ Other commands: `stats` (one match's numbers), `stream` (to stdout, a file, HTTP
 
 - Fabric setup, one command at a time: [`fabric/README.md`](fabric/README.md)
 - The agent team, prompts, verifier and evaluations: [`docs/agents.md`](docs/agents.md)
-- Container Apps deployment, Bicep and the GitHub Actions workflow: [`docs/deploy.md`](docs/deploy.md)
+- Container Apps deployment, what it costs, Bicep and the GitHub Actions workflows: [`docs/deploy.md`](docs/deploy.md)
 
 ## The overlay
 
@@ -236,7 +236,7 @@ team's attack frame (towards x = 105); a renderer flips the away team's events.
 | `matchlab/agents.py`, `docs/agents.md`, `evals/` | the agent team on Foundry, its verifier and evaluations |
 | `matchlab/sinks.py`, `export.py`, `stats.py`, `cli.py` | outputs, exports, numbers, the command line |
 | `fabric/` | KQL tables, functions and queries; reference ingestion; the Fabric setup guide |
-| `infra/`, `Dockerfile`, `.github/workflows/` | Container Apps deployment, tests and image build on every push |
+| `infra/`, `Dockerfile`, `.github/workflows/` | Container Apps deployment (hub at zero replicas, fork service as a per-match job), match-day switches, tests and image build on every push |
 
 ## Status
 
