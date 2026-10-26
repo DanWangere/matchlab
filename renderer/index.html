@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>matchlab overlay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700;800&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #1b2230; --panel: #232c3b; --line: #34405a; --text: #e9ecf2; --muted: #93a0b4;
+    --home: #f2c14e; --away: #7fd3f7; --ghost: #ff7ab8; --alert: #ff5d5d; --ok: #7bd389;
+    --pitch: #2e7b4c; --pitch2: #2a7046; --chalk: rgba(255,255,255,.75);
+    --cond: "Barlow Condensed", "Arial Narrow", sans-serif; --sans: "Barlow", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--ink); color: var(--text); font-family: var(--sans); font-size: 15px; }
+  body { display: grid; grid-template-rows: 56px 1fr; grid-template-columns: 1fr 340px; grid-template-areas: "bug side" "stage side"; height: 100vh; }
+  @media (max-width: 900px) { body { grid-template-columns: 1fr; grid-template-rows: 56px auto auto; grid-template-areas: "bug" "stage" "side"; height: auto; } }
+
+  /* scorebug */
+  #bug { grid-area: bug; display: flex; align-items: center; gap: 14px; padding: 0 18px; border-bottom: 1px solid var(--line); font-family: var(--cond); }
+  #bug .team { font-weight: 700; font-size: 22px; letter-spacing: .02em; display: flex; align-items: center; gap: 8px; }
+  #bug .swatch { width: 10px; height: 22px; border-radius: 2px; }
+  #bug .home .swatch { background: var(--home); } #bug .away .swatch { background: var(--away); }
+  #bug .score { font-weight: 800; font-size: 30px; padding: 0 10px; min-width: 70px; text-align: center; }
+  #bug .clock { font-weight: 700; font-size: 24px; color: var(--muted); margin-left: 6px; font-variant-numeric: tabular-nums; }
+  #bug .status { margin-left: auto; color: var(--muted); font-family: var(--sans); font-size: 13px; }
+  #bug .status.live::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--alert); margin-right: 6px; }
+
+  /* stage: the pitch and the lower third */
+  #stage { grid-area: stage; position: relative; display: flex; align-items: center; justify-content: center; padding: 18px; min-height: 360px; overflow: hidden; }
+  #stage svg { width: 100%; max-height: calc(100vh - 110px); aspect-ratio: 113 / 76; display: block; }
+  .chalk { fill: none; stroke: var(--chalk); stroke-width: .25; }
+  .player circle { stroke: rgba(0,0,0,.45); stroke-width: .2; }
+  .player text { font-family: var(--cond); font-weight: 700; font-size: 1.9px; fill: #1b2230; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+  .player.home circle { fill: var(--home); } .player.away circle { fill: var(--away); }
+  .player.gk circle { fill: #c9cfda; }
+  .player.focus circle { stroke: #fff; stroke-width: .5; }
+  .player .ring { fill: none; stroke: #fff; stroke-width: .35; opacity: 0; }
+  .player.actor .ring { opacity: 1; }
+  #ball { transition: transform .28s linear; }
+  #trail { stroke-width: .35; stroke-linecap: round; opacity: 0; transition: opacity .4s; }
+  #trail.show { opacity: .9; }
+  #trail.shot { stroke-width: .5; }
+  .tag { font-family: var(--cond); font-weight: 700; font-size: 2.6px; fill: #fff; paint-order: stroke; stroke: rgba(0,0,0,.55); stroke-width: .5px; }
+  .tag.sub { font-size: 2px; font-weight: 500; fill: #f4f6fa; }
+  #ghostLayer path { fill: none; stroke: var(--ghost); stroke-width: .5; stroke-dasharray: 1.6 1.1; }
+  #ghostLayer .draw { stroke-dasharray: 300; stroke-dashoffset: 300; animation: draw 1.1s ease-out forwards; }
+  #ghostLayer .alt { stroke-width: .25; opacity: .55; }
+  #ghostLayer.fine path, #ghostLayer.fine .pulse { stroke: var(--muted); }
+  #ghostLayer.fine circle:not(.pulse) { fill: var(--muted); }
+  #ghostLayer.fine .tag { fill: #d7dde8; }
+  #ghostLayer circle { fill: var(--ghost); }
+  #ghostLayer .pulse { fill: none; stroke: var(--ghost); stroke-width: .3; animation: pulse 1.6s ease-out infinite; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  @keyframes pulse { 0% { r: 1; opacity: .9; } 100% { r: 4; opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { #ghostLayer .draw { animation: none; stroke-dashoffset: 0; } #ghostLayer .pulse { animation: none; } #ball { transition: none; } }
+
+  #lower { position: absolute; left: 6%; right: 6%; bottom: 8%; display: flex; align-items: stretch; min-height: 54px; transform: translateY(140%); transition: transform .35s ease; }
+  #lower.show { transform: translateY(0); }
+  #lower .bar { width: 12px; background: var(--home); border-radius: 3px 0 0 3px; }
+  #lower.away .bar { background: var(--away); } #lower.neutral .bar { background: var(--muted); }
+  #lower .body { flex: 1; background: rgba(27,34,48,.94); border-radius: 0 3px 3px 0; padding: 10px 18px; font-family: var(--cond); font-weight: 700; font-size: 24px; line-height: 1.15; display: flex; align-items: center; }
+
+  /* side: the desk */
+  #side { grid-area: side; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  @media (max-width: 900px) { #side { border-left: 0; border-top: 1px solid var(--line); } }
+  .controls { padding: 14px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; }
+  .seg { display: flex; gap: 4px; }
+  .seg button { flex: 1; background: var(--panel); color: var(--muted); border: 1px solid var(--line); padding: 7px 0; font: 600 13px var(--sans); cursor: pointer; border-radius: 3px; }
+  .seg button[aria-pressed="true"] { background: var(--text); color: var(--ink); border-color: var(--text); }
+  .seg button:focus-visible, select:focus-visible { outline: 2px solid var(--away); outline-offset: 1px; }
+  select { width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 7px 8px; font: 500 13px var(--sans); border-radius: 3px; }
+  .row2 { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+  .row2 .seg { width: 150px; }
+  .section { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .section h2 { margin: 0 0 8px; font: 700 13px var(--sans); color: var(--muted); }
+  #cues { display: grid; gap: 8px; min-height: 86px; }
+  .cue { background: var(--panel); border-left: 4px solid var(--muted); padding: 8px 10px; font-size: 14px; line-height: 1.35; border-radius: 0 3px 3px 0; }
+  .cue.home { border-left-color: var(--home); } .cue.away { border-left-color: var(--away); }
+  .cue.ghost { border-left-color: var(--ghost); background: #2b2638; }
+  .cue .when { color: var(--muted); font-family: var(--cond); font-weight: 700; margin-right: 6px; }
+  .cue .alts { margin: 6px 0 0; padding: 0; list-style: none; font-size: 12.5px; color: var(--muted); }
+  .cue .alts li { display: flex; justify-content: space-between; gap: 8px; }
+  .cue .alts li.taken { color: var(--text); }
+  .cue .alts li.best { color: var(--ghost); }
+  #empty { color: var(--muted); font-size: 13px; }
+  .mom { height: 10px; background: var(--panel); border-radius: 5px; position: relative; overflow: hidden; margin: 6px 0 6px; }
+  .mom .mid { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--line); }
+  .mom .fill { position: absolute; top: 0; bottom: 0; background: var(--home); transition: left .4s, width .4s; }
+  .mom .fill.away { background: var(--away); }
+  .momtext { font-size: 13px; color: var(--muted); }
+  table.stats { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.stats td { padding: 3px 0; }
+  table.stats td:first-child, table.stats td:last-child { font-family: var(--cond); font-weight: 700; font-size: 16px; width: 48px; }
+  table.stats td:last-child { text-align: right; }
+  table.stats td:first-child, table.stats td:last-child { white-space: nowrap; }
+  table.stats small { font-family: var(--sans); font-weight: 500; font-size: 12px; color: var(--muted); }
+  table.stats td:nth-child(2) { text-align: center; color: var(--muted); }
+  #feed { flex: 1; overflow: auto; min-height: 120px; }
+  #feed ul { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  #feed li { padding: 3px 0; border-bottom: 1px dashed var(--line); color: var(--muted); display: flex; gap: 8px; }
+  #feed li.hot { color: var(--text); }
+  #feed li .m { font-family: var(--cond); font-weight: 700; width: 30px; flex: none; }
+  #feed li .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; margin-top: 5px; }
+  #feed li .dot.home { background: var(--home); } #feed li .dot.away { background: var(--away); }
+  #player { font-size: 13px; color: var(--muted); display: none; }
+  #player b { color: var(--text); font-family: var(--cond); font-size: 16px; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<header id="bug">
+  <div class="team home"><span class="swatch"></span><span id="homeName">Home</span></div>
+  <div class="score" id="score">0–0</div>
+  <div class="team away"><span class="swatch"></span><span id="awayName">Away</span></div>
+  <div class="clock" id="clock">00:00</div>
+  <div class="status" id="status">waiting for a match</div>
+</header>
+
+<main id="stage">
+  <svg id="pitch" viewBox="-4 -4 113 76" role="img" aria-label="Pitch view">
+    <defs>
+      <pattern id="stripes" width="10.5" height="68" patternUnits="userSpaceOnUse"><rect width="5.25" height="68" fill="var(--pitch)"/><rect x="5.25" width="5.25" height="68" fill="var(--pitch2)"/></pattern>
+    </defs>
+    <rect x="-4" y="-4" width="113" height="76" fill="#246b41"/>
+    <rect x="0" y="0" width="105" height="68" fill="url(#stripes)"/>
+    <g class="chalk">
+      <rect x="0" y="0" width="105" height="68"/>
+      <line x1="52.5" y1="0" x2="52.5" y2="68"/>
+      <circle cx="52.5" cy="34" r="9.15"/>
+      <rect x="0" y="13.84" width="16.5" height="40.32"/><rect x="88.5" y="13.84" width="16.5" height="40.32"/>
+      <rect x="0" y="24.84" width="5.5" height="18.32"/><rect x="99.5" y="24.84" width="5.5" height="18.32"/>
+      <rect x="-2" y="30.34" width="2" height="7.32"/><rect x="105" y="30.34" width="2" height="7.32"/>
+      <circle cx="11" cy="34" r=".35" fill="var(--chalk)"/><circle cx="94" cy="34" r=".35" fill="var(--chalk)"/>
+      <path d="M16.5 26.5 A9.15 9.15 0 0 1 16.5 41.5"/><path d="M88.5 26.5 A9.15 9.15 0 0 0 88.5 41.5"/>
+    </g>
+    <line id="trail" x1="0" y1="0" x2="0" y2="0" stroke="#fff"/>
+    <g id="players"></g>
+    <g id="ghostLayer"></g>
+    <g id="ball" transform="translate(52.5 34)"><circle r=".95" fill="#fff" stroke="#1b2230" stroke-width=".25"/></g>
+    <g id="tags"></g>
+  </svg>
+  <div id="lower"><div class="bar"></div><div class="body" id="lowerText"></div></div>
+</main>
+
+<aside id="side">
+  <div class="controls">
+    <div class="seg" id="modes" role="group" aria-label="Viewer mode">
+      <button data-mode="analyst" aria-pressed="true">Analyst</button>
+      <button data-mode="casual" aria-pressed="false">Casual</button>
+      <button data-mode="club" aria-pressed="false">Club</button>
+      <button data-mode="player" aria-pressed="false">Player</button>
+    </div>
+    <div class="row2">
+      <select id="focus" aria-label="Focus"><option value="">—</option></select>
+      <div class="seg" id="langs" role="group" aria-label="Language">
+        <button data-lang="en" aria-pressed="true">EN</button>
+        <button data-lang="fr" aria-pressed="false">FR</button>
+        <button data-lang="es" aria-pressed="false">ES</button>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <h2 id="hNow">Now</h2>
+    <div id="cues"><div id="empty">Cues appear here as the match plays.</div></div>
+  </div>
+  <div class="section">
+    <h2 id="hMom">Momentum</h2>
+    <div class="mom"><div class="mid"></div><div class="fill" id="momFill" style="left:50%;width:0"></div></div>
+    <div class="momtext" id="momText">—</div>
+  </div>
+  <div class="section">
+    <h2 id="hStats">Match</h2>
+    <table class="stats" id="stats"></table>
+    <div id="player"></div>
+  </div>
+  <div class="section" id="feed"><h2 id="hFeed">Feed</h2><ul id="feedList"></ul></div>
+</aside>
+
+<script>
+(() => {
+  const L = 105, W = 68;
+  const UI = {
+    en: { now: "Now", momentum: "Momentum", match: "Match", feed: "Feed", waiting: "waiting for a match", live: "live", over: "full time",
+          possession: "possession", passes: "passes", shots: "shots", xg: "xG", pressures: "pressures", analyst: "Analyst", casual: "Casual", club: "Club", player: "Player",
+          touches: "touches", completion: "completion", carried: "carried", empty: "Cues appear here as the match plays.", pickTeam: "Pick a club", pickPlayer: "Pick a player",
+          ev: { pass: "pass", carry: "carry", shot: "shot", tackle: "tackle", interception: "interception", clearance: "clearance", pressure: "pressure", foul: "foul", possession_change: "turnover", substitution: "substitution", card: "card", kick_off: "kick-off", period_end: "end of period", goal: "goal" } },
+    fr: { now: "Maintenant", momentum: "Momentum", match: "Match", feed: "Fil", waiting: "en attente d'un match", live: "en direct", over: "fin du match",
+          possession: "possession", passes: "passes", shots: "tirs", xg: "xG", pressures: "pressings", analyst: "Analyste", casual: "Fan", club: "Club", player: "Joueur",
+          touches: "touches", completion: "réussite", carried: "parcourus", empty: "Les cues apparaissent ici pendant le match.", pickTeam: "Choisir un club", pickPlayer: "Choisir un joueur",
+          ev: { pass: "passe", carry: "conduite", shot: "tir", tackle: "tacle", interception: "interception", clearance: "dégagement", pressure: "pressing", foul: "faute", possession_change: "perte de balle", substitution: "remplacement", card: "carton", kick_off: "coup d'envoi", period_end: "fin de période", goal: "but" } },
+    es: { now: "Ahora", momentum: "Momentum", match: "Partido", feed: "Jugadas", waiting: "esperando un partido", live: "en directo", over: "final",
+          possession: "posesión", passes: "pases", shots: "disparos", xg: "xG", pressures: "presiones", analyst: "Analista", casual: "Aficionado", club: "Club", player: "Jugador",
+          touches: "toques", completion: "acierto", carried: "conducidos", empty: "Las cues aparecen aquí durante el partido.", pickTeam: "Elige un club", pickPlayer: "Elige un jugador",
+          ev: { pass: "pase", carry: "conducción", shot: "disparo", tackle: "entrada", interception: "intercepción", clearance: "despeje", pressure: "presión", foul: "falta", possession_change: "pérdida", substitution: "cambio", card: "tarjeta", kick_off: "saque inicial", period_end: "fin del periodo", goal: "gol" } },
+  };
+
+  const S = { mode: "analyst", lang: "en", focusTeam: "", focusPlayer: "", meta: null, names: {}, teamOf: {}, side: {},
+              slots: { home: {}, away: {} }, score: [0, 0], clock: 0, period: 1, live: false, cues: [], feed: [], stats: {}, ps: {}, dial: null, lastLower: null, lowerTimer: 0 };
+  const $ = (id) => document.getElementById(id);
+  const t = () => UI[S.lang];
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  // ---------- geometry: every event is in the acting team's attack frame; the away side is mirrored on screen
+  const pt = (side, x, y) => side === "away" ? [L - x, W - y] : [x, y];
+  const mmss = (s) => { const m = Math.floor(s / 60), r = Math.floor(s % 60); return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`; };
+  const minute = (s) => Math.floor(s / 60) + 1;
+
+  // ---------- meta
+  function setMeta(meta) {
+    S.meta = meta; S.names = {}; S.teamOf = {}; S.slots = { home: {}, away: {} }; S.score = [0, 0]; S.clock = 0; S.period = 1;
+    S.cues = []; S.feed = []; S.stats = {}; S.ps = {}; S.dial = null; S.live = true;
+    for (const side of ["home", "away"]) {
+      const team = meta[side];
+      S.side[team.team_id] = side; S.names[team.team_id] = team.name;
+      for (const p of team.lineup) { S.names[p.player_id] = p.name; S.teamOf[p.player_id] = team.team_id; if (p.starter) S.slots[side][p.player_id] = p; }
+    }
+    $("homeName").textContent = meta.home.short_name; $("awayName").textContent = meta.away.short_name;
+    $("homeName").title = meta.home.name; $("awayName").title = meta.away.name;
+    fillFocus(); drawPlayers(); renderAll();
+  }
+
+  function fillFocus() {
+    const sel = $("focus"); sel.innerHTML = "";
+    const opt = (v, label) => { const o = document.createElement("option"); o.value = v; o.textContent = label; return o; };
+    if (S.mode === "club") {
+      sel.appendChild(opt("", t().pickTeam));
+      for (const side of ["home", "away"]) sel.appendChild(opt(S.meta[side].team_id, S.meta[side].name));
+      sel.value = S.focusTeam; sel.disabled = false;
+    } else if (S.mode === "player") {
+      sel.appendChild(opt("", t().pickPlayer));
+      for (const side of ["home", "away"]) { const g = document.createElement("optgroup"); g.label = S.meta[side].name;
+        for (const p of S.meta[side].lineup) g.appendChild(opt(p.player_id, `${p.shirt} ${p.name}`)); sel.appendChild(g); }
+      sel.value = S.focusPlayer; sel.disabled = false;
+    } else { sel.appendChild(opt("", "—")); sel.disabled = true; }
+  }
+
+  // ---------- pitch
+  function drawPlayers() {
+    const g = $("players"); g.innerHTML = "";
+    for (const side of ["home", "away"]) for (const p of Object.values(S.slots[side])) {
+      const [x, y] = pt(side, p.x, p.y);
+      const el = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      el.setAttribute("class", `player ${side}${p.role === "GK" ? " gk" : ""}${p.player_id === S.focusPlayer ? " focus" : ""}`);
+      el.dataset.id = p.player_id; el.setAttribute("transform", `translate(${x} ${y})`);
+      el.innerHTML = `<circle class="ring" r="2.6"/><circle r="1.7"/><text>${p.shirt}</text>`;
+      el.querySelector("text").setAttribute("y", ".05");
+      if (p.player_id === S.focusPlayer && S.mode === "player") { const lbl = document.createElementNS("http://www.w3.org/2000/svg", "text"); lbl.setAttribute("class", "tag sub"); lbl.setAttribute("y", y > 8 ? "-3.2" : "4.8"); lbl.setAttribute("text-anchor", "middle"); lbl.textContent = S.names[p.player_id] || ""; el.appendChild(lbl); }
+      g.appendChild(el);
+    }
+  }
+  function playerEl(id) { return document.querySelector(`#players .player[data-id="${id}"]`); }
+  function setActor(id) { document.querySelectorAll("#players .actor").forEach((e) => e.classList.remove("actor")); const el = playerEl(id); if (el) el.classList.add("actor"); }
+  function moveBall(x, y) { $("ball").setAttribute("transform", `translate(${x} ${y})`); }
+  function showTrail(side, ev) {
+    const tr = $("trail");
+    if (ev.end_x == null) { tr.classList.remove("show"); return; }
+    const [x1, y1] = pt(side, ev.x, ev.y), [x2, y2] = pt(side, ev.end_x, ev.end_y);
+    tr.setAttribute("x1", x1); tr.setAttribute("y1", y1); tr.setAttribute("x2", x2); tr.setAttribute("y2", y2);
+    tr.setAttribute("stroke", ev.type === "shot" ? "#fff" : ev.outcome === "incomplete" ? "var(--alert)" : side === "home" ? "var(--home)" : "var(--away)");
+    tr.classList.toggle("shot", ev.type === "shot"); tr.classList.add("show");
+  }
+  function pitchTag(side, x, y, text, sub) {
+    const [px, py] = pt(side, x, y); const g = $("tags");
+    const el = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    const above = py > 10; el.setAttribute("x", Math.min(Math.max(px, 8), L - 8)); el.setAttribute("y", above ? py - 3.4 : py + 5.2);
+    el.setAttribute("text-anchor", "middle"); el.setAttribute("class", "tag" + (sub ? " sub" : "")); el.textContent = text;
+    g.appendChild(el); setTimeout(() => el.remove(), 3600);
+  }
+  function showGhost(cue) {
+    const g = $("ghostLayer"); g.innerHTML = "";
+    const geo = cue.geometry; if (!geo || geo.end_x == null) return;
+    g.setAttribute("class", geo.worth_it ? "" : "fine");
+    const [x1, y1] = pt(geo.side, geo.x, geo.y), [x2, y2] = pt(geo.side, geo.end_x, geo.end_y);
+    for (const c of (geo.candidates || [])) {
+      if (c.taken || c.end_x == null) continue;
+      const [ax, ay] = pt(geo.side, c.end_x, c.end_y);
+      const p = document.createElementNS("http://www.w3.org/2000/svg", "path"); p.setAttribute("class", "alt");
+      p.setAttribute("d", `M${x1} ${y1} L${ax} ${ay}`); g.appendChild(p);
+    }
+    const main = document.createElementNS("http://www.w3.org/2000/svg", "path"); main.setAttribute("class", "draw");
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2 - (geo.kind === "pass" ? 4 : 0);
+    main.setAttribute("d", `M${x1} ${y1} Q${mx} ${my} ${x2} ${y2}`); g.appendChild(main);
+    const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle"); dot.setAttribute("cx", x2); dot.setAttribute("cy", y2); dot.setAttribute("r", "1"); g.appendChild(dot);
+    const pulse = document.createElementNS("http://www.w3.org/2000/svg", "circle"); pulse.setAttribute("class", "pulse"); pulse.setAttribute("cx", x2); pulse.setAttribute("cy", y2); g.appendChild(pulse);
+    const best = (geo.candidates || []).find((c) => !c.taken && c.end_x != null && Math.abs(c.end_x - geo.end_x) < .01) || (geo.candidates || []).find((c) => !c.taken);
+    if (best) { const lbl = document.createElementNS("http://www.w3.org/2000/svg", "text"); lbl.setAttribute("class", "tag"); lbl.setAttribute("x", Math.min(Math.max(x2, 8), L - 8)); lbl.setAttribute("y", y2 > 10 ? y2 - 3 : y2 + 5); lbl.setAttribute("text-anchor", "middle"); if (geo.worth_it) lbl.setAttribute("fill", "var(--ghost)"); lbl.textContent = `${Math.round(best.p_goal_for * 100)}%`; g.appendChild(lbl); }
+    setTimeout(() => { if (g.firstChild === main || g.contains(main)) g.innerHTML = ""; }, Math.max(4, Math.min(12, cue.duration_s)) * 1000);
+  }
+
+  // ---------- events
+  function onEvent(ev) {
+    S.clock = ev.clock_s; S.period = ev.period; S.score = [ev.score_home, ev.score_away];
+    const side = S.side[ev.team_id] || "home";
+    if (ev.x != null) { const [bx, by] = pt(side, ev.end_x != null && ev.type !== "shot" ? ev.end_x : ev.x, ev.end_x != null && ev.type !== "shot" ? ev.end_y : ev.y); moveBall(bx, by); }
+    if (ev.type === "shot") { const [gx, gy] = pt(side, L, ev.end_y ?? W / 2); setTimeout(() => moveBall(gx, gy), 120); }
+    if (["pass", "carry", "shot", "clearance"].includes(ev.type)) { setActor(ev.player_id); showTrail(side, ev); }
+    if (ev.type === "pressure" || ev.type === "tackle" || ev.type === "interception") { const el = playerEl(ev.player_id); if (el) { el.classList.add("actor"); setTimeout(() => el.classList.remove("actor"), 400); } }
+    if (ev.type === "substitution") { const slot = S.slots[side][ev.detail.off]; if (slot) { delete S.slots[side][ev.detail.off]; S.slots[side][ev.detail.on] = { ...slot, player_id: ev.detail.on, shirt: (S.meta[side].lineup.find((p) => p.player_id === ev.detail.on) || {}).shirt || "?" }; drawPlayers(); } }
+    if (ev.type === "period_end" && ev.detail.period === 2) S.live = false;
+    // stats
+    const st = S.stats[ev.team_id] = S.stats[ev.team_id] || { onball: 0, passes: 0, completed: 0, shots: 0, xg: 0, pressures: 0 };
+    if (["pass", "carry", "shot", "clearance"].includes(ev.type)) st.onball++;
+    if (ev.type === "pass") { st.passes++; if (ev.outcome === "complete") st.completed++; }
+    if (ev.type === "shot") { st.shots++; st.xg += ev.xg || 0; }
+    if (ev.type === "pressure") st.pressures++;
+    if (ev.player_id) { const p = S.ps[ev.player_id] = S.ps[ev.player_id] || { touches: 0, passes: 0, completed: 0, shots: 0, xg: 0, carried: 0, hard: 0 };
+      if (["pass", "carry", "shot", "clearance"].includes(ev.type)) p.touches++;
+      if (ev.type === "pass") { p.passes++; if (ev.outcome === "complete") { p.completed++; if (ev.pass_difficulty >= .5) p.hard++; } }
+      if (ev.type === "shot") { p.shots++; p.xg += ev.xg || 0; }
+      if (ev.type === "carry" && ev.end_x != null) p.carried += Math.hypot(ev.end_x - ev.x, ev.end_y - ev.y);
+    }
+    // feed
+    const hot = ev.type === "shot" || ev.type === "card" || ev.type === "substitution" || ev.type === "period_end";
+    const detail = ["interception", "tackle"].includes(ev.type) || (ev.type === "pass" && ev.pass_difficulty >= .45);
+    if (hot || detail || (ev.player_id && ["pass", "carry", "shot", "clearance"].includes(ev.type))) { S.feed.unshift({ ev, hot, detail }); S.feed.length = Math.min(S.feed.length, 120); }
+    renderBug(); renderStats(); renderFeed();
+  }
+
+  // ---------- cues
+  function cueVisible(c) {
+    if (!c.modes.includes(S.mode)) return false;
+    if (S.mode === "club" && S.focusTeam && c.team_id && c.team_id !== S.focusTeam) return false;
+    if (S.mode === "club" && !S.focusTeam && c.layer === "tag") return false;
+    if (S.mode === "player" && (!S.focusPlayer || (c.player_id && c.player_id !== S.focusPlayer))) return c.layer === "lower_third" || c.layer === "dial" ? true : false;
+    return true;
+  }
+  function cueText(c) { const a = S.mode === "analyst" && c.text_analyst && c.text_analyst[S.lang]; return a || c.text[S.lang] || c.text.en; }
+  function onCue(c) {
+    if (c.layer === "dial") { S.dial = c; renderMomentum(); return; }
+    if (!cueVisible(c)) return;
+    c._until = Date.now() + Math.max(3, Math.min(12, c.duration_s)) * 1000;
+    S.cues.unshift(c); S.cues.length = Math.min(S.cues.length, 5);
+    if (c.layer === "lower_third") showLower(c);
+    if (c.layer === "ghost") showGhost(c);
+    if ((c.layer === "tag" || c.layer === "card") && c.geometry && c.geometry.x != null && c.player_id) pitchTag(c.geometry.side, c.geometry.x, c.geometry.y, S.names[c.player_id] || "");
+    renderCues();
+  }
+  function showLower(c) {
+    const lw = $("lower"); const side = c.team_id ? S.side[c.team_id] : "neutral";
+    lw.className = side === "away" ? "away" : side === "home" ? "" : "neutral"; $("lowerText").textContent = cueText(c);
+    requestAnimationFrame(() => lw.classList.add("show"));
+    clearTimeout(S.lowerTimer); S.lowerTimer = setTimeout(() => lw.classList.remove("show"), Math.max(4, Math.min(12, c.duration_s)) * 1000);
+  }
+  function renderCues() {
+    const now = Date.now(); S.cues = S.cues.filter((c) => c._until > now);
+    const box = $("cues");
+    if (!S.cues.length) { box.innerHTML = `<div id="empty">${esc(t().empty)}</div>`; return; }
+    box.innerHTML = S.cues.map((c) => {
+      const side = c.team_id ? S.side[c.team_id] : ""; let alts = "";
+      if (c.layer === "ghost" && S.mode === "analyst" && c.geometry.candidates) {
+        const best = c.geometry.candidates.filter((x) => !x.taken).sort((a, b) => b.value - a.value)[0];
+        alts = `<ul class="alts">` + c.geometry.candidates.map((x) => `<li class="${x.taken ? "taken" : (x === best ? "best" : "")}"><span>${esc(x.type === "pass" ? (x.subtype + " → " + (S.names[x.receiver] || "")) : x.type)}${x.taken ? " ✓" : ""}</span><span>${Math.round(x.p_goal_for * 100)}%</span></li>`).join("") + `</ul>`;
+      }
+      return `<div class="cue ${c.layer === "ghost" ? "ghost" : side}"><span class="when">${minute(c.t_start_s)}'</span>${esc(cueText(c))}${alts}</div>`;
+    }).join("");
+  }
+  setInterval(renderCues, 1000);
+
+  // ---------- panels
+  function renderBug() {
+    $("score").textContent = `${S.score[0]}–${S.score[1]}`;
+    $("clock").textContent = S.period === 2 && S.clock < 2700 ? "45:00" : mmss(S.clock);
+    const st = $("status"); st.textContent = S.meta ? (S.live ? t().live : t().over) : t().waiting; st.classList.toggle("live", !!S.meta && S.live);
+  }
+  function renderStats() {
+    if (!S.meta) return;
+    const h = S.stats[S.meta.home.team_id] || {}, a = S.stats[S.meta.away.team_id] || {};
+    const tot = (h.onball || 0) + (a.onball || 0);
+    const row = (label, hv, av) => `<tr><td>${hv}</td><td>${esc(label)}</td><td>${av}</td></tr>`;
+    $("stats").innerHTML = row(t().possession, tot ? Math.round(100 * (h.onball || 0) / tot) + "%" : "–", tot ? Math.round(100 * (a.onball || 0) / tot) + "%" : "–")
+      + row(t().passes, `${h.passes || 0}` + (h.passes ? ` <small>${Math.round(100 * h.completed / h.passes)}%</small>` : ""), `${a.passes || 0}` + (a.passes ? ` <small>${Math.round(100 * a.completed / a.passes)}%</small>` : ""))
+      + row(t().shots, h.shots || 0, a.shots || 0) + row(t().xg, (h.xg || 0).toFixed(2), (a.xg || 0).toFixed(2))
+      + (S.mode === "analyst" ? row(t().pressures, h.pressures || 0, a.pressures || 0) : "");
+    const pp = $("player");
+    if (S.mode === "player" && S.focusPlayer) { const p = S.ps[S.focusPlayer] || {}; pp.style.display = "block";
+      pp.innerHTML = `<b>${esc(S.names[S.focusPlayer] || "")}</b><br>${p.touches || 0} ${t().touches}, ${p.passes || 0} ${t().passes}` + (p.passes ? ` (${Math.round(100 * p.completed / p.passes)}% ${t().completion})` : "") + `, ${p.shots || 0} ${t().shots}, xG ${(p.xg || 0).toFixed(2)}, ${Math.round(p.carried || 0)} m ${t().carried}`; }
+    else pp.style.display = "none";
+  }
+  function renderMomentum() {
+    const c = S.dial; const fill = $("momFill");
+    if (!c) { fill.style.width = "0"; $("momText").textContent = "—"; return; }
+    const v = Math.max(-1, Math.min(1, c.geometry.value || 0));
+    fill.className = "fill" + (v < 0 ? " away" : ""); fill.style.width = `${Math.abs(v) * 50}%`; fill.style.left = v > 0 ? `${50 - Math.abs(v) * 50}%` : "50%";
+    $("momText").textContent = cueText(c);
+  }
+  function renderFeed() {
+    const keep = ({ ev, hot, detail }) => S.mode === "player" && S.focusPlayer ? (ev.player_id === S.focusPlayer || (ev.detail && (ev.detail.on === S.focusPlayer || ev.detail.off === S.focusPlayer)))
+      : S.mode === "club" && S.focusTeam ? (ev.team_id === S.focusTeam && (hot || ev.type === "pass")) : (hot || (detail && S.mode === "analyst"));
+    $("feedList").innerHTML = S.feed.filter(keep).slice(0, 14).map(({ ev, hot }) => {
+      const side = S.side[ev.team_id] || ""; const who = S.names[ev.player_id] || (ev.type === "period_end" ? "" : S.names[ev.team_id] || "");
+      let what = t().ev[ev.type] || ev.type;
+      if (ev.type === "shot") what = ev.outcome === "goal" ? t().ev.goal.toUpperCase() : `${what} (${ev.outcome}${S.mode === "analyst" ? `, xG ${(ev.xg || 0).toFixed(2)}` : ""})`;
+      else if (ev.type === "pass" && S.mode === "analyst") what += ` ${Math.round(ev.pass_length_m)} m, ${ev.pass_difficulty.toFixed(2)}${ev.outcome === "incomplete" ? " ✗" : ""}`;
+      else if (ev.type === "substitution") what += `: ${S.names[ev.detail.on] || ""} ↔ ${S.names[ev.detail.off] || ""}`;
+      return `<li class="${hot ? "hot" : ""}"><span class="m">${minute(ev.clock_s)}'</span><span class="dot ${side}"></span><span>${esc(who)} ${esc(what)}</span></li>`;
+    }).join("");
+  }
+  function renderLabels() {
+    $("hNow").textContent = t().now; $("hMom").textContent = t().momentum; $("hStats").textContent = t().match; $("hFeed").textContent = t().feed;
+    document.querySelectorAll("#modes button").forEach((b) => b.textContent = t()[b.dataset.mode]);
+  }
+  function renderAll() { renderLabels(); renderBug(); renderStats(); renderMomentum(); renderFeed(); renderCues(); drawPlayers(); }
+
+  // ---------- controls
+  $("modes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return;
+    S.mode = b.dataset.mode; document.querySelectorAll("#modes button").forEach((x) => x.setAttribute("aria-pressed", x === b)); S.cues = []; if (S.meta) fillFocus(); renderAll(); });
+  $("langs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return;
+    S.lang = b.dataset.lang; document.querySelectorAll("#langs button").forEach((x) => x.setAttribute("aria-pressed", x === b)); if (S.meta) fillFocus(); renderAll(); if (S.dial) renderMomentum(); });
+  $("focus").addEventListener("change", (e) => { if (S.mode === "club") S.focusTeam = e.target.value; if (S.mode === "player") S.focusPlayer = e.target.value; S.cues = []; renderAll(); });
+
+  // ---------- the stream
+  function connect() {
+    const es = new EventSource("/stream");
+    es.addEventListener("meta", (e) => setMeta(JSON.parse(e.data)));
+    es.addEventListener("event", (e) => { if (S.meta) onEvent(JSON.parse(e.data)); });
+    es.addEventListener("cue", (e) => { if (S.meta) onCue(JSON.parse(e.data)); });
+    es.addEventListener("reset", () => { S.cues = []; S.feed = []; renderAll(); });
+    es.onerror = () => { $("status").textContent = "reconnecting…"; };
+  }
+  renderLabels(); renderBug(); connect();
+})();
+</script>
+</body>
+</html>

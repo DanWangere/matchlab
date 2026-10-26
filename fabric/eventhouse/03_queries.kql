@@ -54,7 +54,7 @@ FeatureShifts("RAV-IRO-1000", "t19", "pressures_made", 1.5)
 
 // ---------------------------------------------------------------- the brief's features
 
-PassQuality("RAV-IRO-1000") | top 10 by hard_passes_completed desc
+PassQuality("RAV-IRO-1000") | top 10 by hard_passes desc
 SpeedMetrics("RAV-IRO-1000") | top 5 by fastest_shot_kmh desc
 PlayerThresholds("RAV-IRO-1000", 400.0, 25.0) | where distance_flag or speed_flag
 KeyMoments("RAV-IRO-1000") | top 8 by importance desc

@@ -14,6 +14,7 @@ from .export import export_all
 from .fork import action_events, fork, rebuild_to_event
 from .league import League, make_league
 from .schema import JSON_SCHEMA, Event
+from .serve import play, serve_only
 from .sim import Simulator
 from .sinks import make_sink, read_jsonl
 from .stats import summarize
@@ -111,6 +112,68 @@ def cmd_export(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_play(a: argparse.Namespace) -> int:
+    play(a.match, a.league, a.speed, a.port, forks=a.forks, rollouts=a.rollouts, horizon=a.horizon, loop=a.loop)
+    return 0
+
+
+def cmd_serve(a: argparse.Namespace) -> int:
+    serve_only(a.port)
+    return 0
+
+
+def cmd_forkd(a: argparse.Namespace) -> int:
+    from .follow import ForkPolicy
+    from .forkd import ForkService, KustoIngest, KustoQuery, MetaStore, Outputs, eventhouse_events, eventhub_events, file_events, load_grid
+
+    league = _load_league(a.league)
+    kql = None
+    if a.source == "eventhouse" or a.kusto_query_uri:
+        uri = a.kusto_query_uri or os.environ.get("KUSTO_QUERY_URI")
+        db = a.kusto_database or os.environ.get("KUSTO_DATABASE", "matchlab")
+        if not uri:
+            print("--kusto-query-uri (or KUSTO_QUERY_URI) is required for the eventhouse source", file=sys.stderr)
+            return 2
+        kql = KustoQuery(uri, db)
+    ingest = None
+    if a.ingest:
+        iuri = a.kusto_ingest_uri or os.environ.get("KUSTO_INGEST_URI")
+        db = a.kusto_database or os.environ.get("KUSTO_DATABASE", "matchlab")
+        if not iuri:
+            print("--kusto-ingest-uri (or KUSTO_INGEST_URI) is required with --ingest", file=sys.stderr)
+            return 2
+        ingest = KustoIngest(iuri, db)
+    grid = None if a.value == "goals" else load_grid(a.grid, a.data)
+    if a.value == "threat" and grid is None:
+        print("no matches in data/ to learn the threat grid from; run `matchlab generate` or pass --value goals", file=sys.stderr)
+        return 2
+    policy = ForkPolicy(rollouts=a.rollouts, horizon=a.horizon, min_gap_s=a.min_gap, max_per_match=a.max_forks)
+    outputs = Outputs(hub_url=a.hub, file_path=a.out, ingest=ingest, quiet=a.quiet, cue_min_regret=a.cue_min_regret)
+    service = ForkService(league, MetaStore(a.data, kql), grid, policy, outputs, hub_url=a.hub)
+    if a.source == "file":
+        if not a.match:
+            print("--match <path prefix> is required for the file source", file=sys.stderr)
+            return 2
+        events = file_events(a.match)
+    elif a.source == "eventhouse":
+        if not a.match:
+            print("--match <match_id> is required for the eventhouse source", file=sys.stderr)
+            return 2
+        events = eventhouse_events(kql, a.match, follow=a.follow)
+    else:
+        events = eventhub_events(consumer_group=a.consumer_group, from_start=a.from_start)
+    print(f"forkd: source={a.source} value={a.value} rollouts={a.rollouts} horizon={a.horizon}"
+          f"{' hub=' + a.hub if a.hub else ''}{' ingest=on' if ingest else ''}", file=sys.stderr)
+    try:
+        summary = service.run(events, mirror_events_to_hub=a.mirror)
+    except KeyboardInterrupt:
+        summary = {"stopped": True, "matches": {m: {"forks": f.stats.forks, "mismatches": f.stats.mismatches} for m, f in service.followers.items()}}
+    finally:
+        outputs.close()
+    print(json.dumps(summary, indent=1), file=sys.stderr)
+    return 0
+
+
 def cmd_fork(a: argparse.Namespace) -> int:
     league = _load_league(a.league)
     events, meta = _load_match(a.match)
@@ -132,6 +195,16 @@ def cmd_fork(a: argparse.Namespace) -> int:
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:
             json.dump(record, f, indent=1)
+    if a.cue or a.post:
+        from .cues import cue_from_fork
+        c = cue_from_fork(record, meta)
+        if a.cue:
+            with open(a.cue, "w", encoding="utf-8") as f:
+                f.write(c.to_json() + "\n")
+        if a.post:
+            from .sinks import HttpSink
+            HttpSink(a.post.rstrip("/") + "/cues").send([c.to_dict()])
+            print(f"posted ghost cue to {a.post}", file=sys.stderr)
     t = record
     print(f"{t['match_id']} minute {t['minute']} {t['player_name']} at ({t['x']}, {t['y']})"
           f"{' under pressure' if t['under_pressure'] else ''}, score {t['score']['home']}-{t['score']['away']}")
@@ -186,7 +259,49 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--rollouts", type=int, default=200)
     s.add_argument("--horizon", type=int, default=20)
     s.add_argument("--out", default=None, help="write the fork record as JSON")
+    s.add_argument("--cue", default=None, help="also write the ghost cue as JSON")
+    s.add_argument("--post", default=None, help="also post the ghost cue to a running hub, e.g. http://localhost:8080")
     s.set_defaults(fn=cmd_fork)
+
+    s = sub.add_parser("forkd", help="the Otherwise fork service: follow a stream, fork the decisions that matter, publish ghosts")
+    s.add_argument("--source", choices=["eventhub", "eventhouse", "file"], default="eventhub")
+    s.add_argument("--match", default=None, help="file: path prefix; eventhouse: match_id")
+    s.add_argument("--league", default="data/league.json")
+    s.add_argument("--data", default="data", help="where match metadata and the threat grid's matches live")
+    s.add_argument("--value", choices=["threat", "goals"], default="threat")
+    s.add_argument("--grid", default="data/threat_grid.json", help="cache for the learned threat grid")
+    s.add_argument("--rollouts", type=int, default=120)
+    s.add_argument("--horizon", type=int, default=20)
+    s.add_argument("--min-gap", type=float, default=45.0, help="seconds of match clock between non-shot forks")
+    s.add_argument("--max-forks", type=int, default=25)
+    s.add_argument("--cue-min-regret", type=float, default=0.03, help="post a ghost only when the untaken option beats the taken one by this much (shots always post)")
+    s.add_argument("--hub", default=None, help="post ghost cues to a running hub, e.g. http://localhost:8080")
+    s.add_argument("--mirror", action="store_true", help="also forward the events to the hub (one process drives the renderer)")
+    s.add_argument("--out", default=None, help="append fork records and cues as JSONL")
+    s.add_argument("--ingest", action="store_true", help="write ForkRecords and Cues to Eventhouse (queued ingestion)")
+    s.add_argument("--kusto-query-uri", default=None)
+    s.add_argument("--kusto-ingest-uri", default=None)
+    s.add_argument("--kusto-database", default=None)
+    s.add_argument("--consumer-group", default="$Default")
+    s.add_argument("--from-start", action="store_true", help="eventhub: read from the beginning of retention instead of new events only")
+    s.add_argument("--follow", action="store_true", help="eventhouse: keep polling for new rows")
+    s.add_argument("--quiet", action="store_true")
+    s.set_defaults(fn=cmd_forkd)
+
+    s = sub.add_parser("play", help="serve the renderer and replay a match with baseline and fork cues")
+    s.add_argument("match", help="path prefix, e.g. data/matches/NBU-HAR-1000")
+    s.add_argument("--league", default="data/league.json")
+    s.add_argument("--speed", type=float, default=20.0, help="match seconds per wall second")
+    s.add_argument("--port", type=int, default=8080)
+    s.add_argument("--forks", type=int, default=3, help="fork the N highest-xG open-play shots before kick-off")
+    s.add_argument("--rollouts", type=int, default=200)
+    s.add_argument("--horizon", type=int, default=20)
+    s.add_argument("--loop", action="store_true", help="replay the match again when it ends")
+    s.set_defaults(fn=cmd_play)
+
+    s = sub.add_parser("serve", help="serve the renderer only; feed it over HTTP")
+    s.add_argument("--port", type=int, default=8080)
+    s.set_defaults(fn=cmd_serve)
 
     a = p.parse_args(argv)
     return a.fn(a)

@@ -6,4 +6,3 @@ build/
 dist/
 data/
 .env
-.venv/

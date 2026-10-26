@@ -14,7 +14,8 @@ All clubs, players and matches are fictional. No real match data is included or 
 | Event stream, one row per on-ball action | `data/matches/<id>.events.jsonl` | yes | Eventstream, Eventhouse, renderer, agents |
 | Match metadata: line-ups, formations, venue | `data/matches/<id>.meta.json` | at kick-off | everything |
 | Hidden ground truth: momentum, fatigue, press intent, risk appetite per team per minute, plus every instruction change and its cause | `data/truth/<id>.truth.json` | never | Undertow training and scoring |
-| Fork record: the decision taken, the alternatives, their rollout values | `matchlab fork --out` | later, as cues | Otherwise |
+| Fork record: the decision taken, the alternatives, their rollout values | `matchlab fork --out` | as a ghost cue (`--cue`, `--post`) | Otherwise |
+| Cues: timed overlay instructions in three languages | `matchlab play`, `cues.py` | yes | the renderer, any graphics partner |
 | JSON schema for the event | `data/event.schema.json` | | Eventhouse table definition |
 | Flat reference and truth files | `data/export/*.jsonl` (`matchlab export`) | | Eventhouse reference tables, Lakehouse |
 
@@ -31,8 +32,30 @@ matchlab stats data/matches/RAV-IRO-1000                   # one match's numbers
 matchlab stream data/matches/RAV-IRO-1000 --speed 20       # replay to stdout at 20x
 matchlab fork data/matches/RAV-IRO-1000 --rollouts 200     # price the biggest chance's alternatives
 matchlab export                                            # flat JSONL for Eventhouse and Lakehouse
+matchlab play data/matches/RAV-IRO-1000 --speed 20         # the overlay at http://localhost:8080 with baseline and fork cues
+matchlab forkd --source file --match data/matches/RAV-IRO-1000 --hub http://localhost:8080 --mirror   # Otherwise, live
 python -m pytest
 ```
+
+## The overlay
+
+`matchlab play` serves `renderer/index.html` and replays a match into it over server-sent events,
+emitting cues on the match clock: the baseline cues computed from the stream (goals, big chances,
+hard passes, fastest shot, cards, substitutions, half and full time, a momentum dial every minute,
+player milestones) and ghost cues from forking the highest-xG shots before kick-off.
+
+The page draws a 2D pitch with both line-ups, the ball, the current pass or carry, name tags, the
+ghost path for a fork, a lower third, and a desk with the live cue stack, momentum, match stats and
+a feed. Four viewer modes read the same cues differently: Analyst (numbers, every cue), Casual
+(plain lines, the big moments), Club (one side's cues) and Player (one player's cues, a persistent
+tag, and their running numbers). Three languages, switchable live: English, French, Spanish.
+
+Everything on screen comes from cues, never from raw events, so a broadcast graphics partner can
+consume the same objects (`matchlab/cues.py` documents the fields). `matchlab serve` runs the hub
+alone; feed it with `matchlab stream --sink http://localhost:8080/events` and
+`matchlab fork ... --post http://localhost:8080`, or POST to `/events`, `/cues` and `/meta` from
+anywhere. The production shape is the same with Cosmos DB and Web PubSub in place of the hub.
+
 
 Streaming to a Fabric Eventstream: create a custom-endpoint source, copy its Event Hub
 connection string and name, then
@@ -112,11 +135,16 @@ there; the real data stays out of the repo.
    fork records, ledger rows and cues; KQL functions for match state (possession chains, a threat
    grid learned from the league, pass quality, speed metrics, windowed team features, momentum,
    control versus chaos); Lakehouse for the truth files.
-3. **Cue contract and renderer.** Timed, machine-readable overlay cues in Cosmos DB, pushed
-   by Web PubSub to a 2D pitch renderer with viewer modes and language switches.
-4. **Otherwise.** The fork service around `fork.py`: fork-worthiness rules, a possession-value
-   or win-probability model to replace the raw goal count as the rollout value, fork records
-   into Eventhouse, ghost cues.
+3. **Cue contract and renderer.** Done locally: `cues.py`, `serve.py`, `renderer/index.html`,
+   `matchlab play`. Remaining for the cloud: Cosmos DB for cues and viewer profiles, Web PubSub
+   fan-out, the renderer hosted on Static Web Apps or Container Apps.
+4. **Otherwise.** Done: `matchlab forkd` (`follow.py`, `threat.py`, `forkd.py`). A Follower keeps a
+   deterministic copy of the match in step with the stream and forks just before each decision the
+   policy wants (every open-play shot, final-third moments with a through ball, cross or shot
+   available, at most one every 45 s). Branches are valued with a threat grid learned from the
+   league (the same 12 x 8 cells as the Eventhouse `ThreatGrid`), so candidates separate after
+   about 100 rollouts, 0.5 s per fork. Inputs: Event Hub (live), Eventhouse (replay or `--follow`),
+   file. Outputs: ghost cues to the hub, JSONL, `ForkRecords` and `Cues` in Eventhouse.
 5. **Foundry agents.** Explainer, Localiser (English, French, Spanish), Verifier, Recap, writing
    only from fork records and ledger rows.
 6. **Undertow.** Pre-match ledger agent, windowed features in Eventstream, a state estimator

@@ -12,6 +12,11 @@ from .league import League
 from .schema import Event
 from .sim import Simulator
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .threat import ThreatGrid
+
 
 def rebuild_to_event(league: League, meta: dict[str, Any], event_id: int) -> tuple[Simulator, bool]:
     """Re-simulate deterministically to the ready state whose next action produced `event_id`.
@@ -47,8 +52,14 @@ def describe(sim: Simulator, action: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
-def fork(sim: Simulator, n_rollouts: int = 200, horizon: int = 20) -> dict[str, Any]:
-    """From a ready state, evaluate every candidate action by rollout. Leaves the match where it was."""
+def fork(sim: Simulator, n_rollouts: int = 200, horizon: int = 20, grid: Optional["ThreatGrid"] = None,
+         taken_action: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """From a ready state, evaluate every candidate action by rollout. Leaves the match where it was.
+
+    `grid` switches the value from a raw goal count to the threat model (goals plus discounted threat
+    built), which separates candidates that rarely score within the horizon. `taken_action` names
+    the action the real stream took (matched by type, subtype and receiver); without it the policy's
+    own draw decides, which is what rebuild_to_event guarantees to be the real one."""
     assert sim.s.ready, "fork() needs a ready state: call prepare() first"
     s = sim.s
     side = s.possession
@@ -64,11 +75,19 @@ def fork(sim: Simulator, n_rollouts: int = 200, horizon: int = 20) -> dict[str, 
             taken = c
             break
     sim.restore(snap)
+    if taken_action is not None:
+        match = [c for c in cands if c["type"] == taken_action.get("type")
+                 and c.get("subtype") == taken_action.get("subtype")
+                 and (c["type"] != "pass" or c.get("receiver") == taken_action.get("receiver"))]
+        if match:
+            taken = match[0]
 
     results = []
     for ci, c in enumerate(cands):
         goals_for = goals_against = 0
         xg_for = 0.0
+        value_sum = 0.0
+        threat_sum = 0.0
         for k in range(n_rollouts):
             evs = sim.rollout(horizon, first_action=c, salt=ci * 100000 + k)
             if not evs:
@@ -80,11 +99,18 @@ def fork(sim: Simulator, n_rollouts: int = 200, horizon: int = 20) -> dict[str, 
             goals_for += 1 if gf > 0 else 0
             goals_against += 1 if ga > 0 else 0
             xg_for += sum((e.xg or 0.0) for e in evs if e.type == "shot" and e.team_id == ts.team_id)
+            if grid is not None:
+                rv = grid.rollout_value(evs, ts.team_id, base_for, base_against, side)
+                value_sum += rv["value"]
+                threat_sum += rv["threat"]
+            else:
+                value_sum += gf - ga
         n = max(1, n_rollouts)
         r = describe(sim, c)
         r.update({
             "p_goal_for": round(goals_for / n, 3), "p_goal_against": round(goals_against / n, 3),
-            "xg_for": round(xg_for / n, 3), "value": round((goals_for - goals_against) / n, 3),
+            "xg_for": round(xg_for / n, 3), "value": round(value_sum / n, 4),
+            "threat": round(threat_sum / n, 4) if grid is not None else None,
             "taken": c is taken,
         })
         results.append(r)
@@ -98,7 +124,7 @@ def fork(sim: Simulator, n_rollouts: int = 200, horizon: int = 20) -> dict[str, 
         "player_id": s.carrier, "player_name": carrier.name if carrier else None,
         "x": round(s.x, 1), "y": round(s.y, 1), "under_pressure": s.under_pressure,
         "score": {"home": sim.ts("home").goals, "away": sim.ts("away").goals},
-        "rollouts": n_rollouts, "horizon_events": horizon,
+        "rollouts": n_rollouts, "horizon_events": horizon, "value_model": "threat_grid" if grid is not None else "goals",
         "taken": taken_r, "best_untaken": best_untaken,
         "regret": round((best_untaken["value"] - taken_r["value"]) if best_untaken else 0.0, 3),
         "candidates": results,
