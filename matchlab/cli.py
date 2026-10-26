@@ -88,8 +88,11 @@ def cmd_stream(a: argparse.Namespace) -> int:
         for d in rows:
             due = (d["clock_s"] - first_clock) / a.speed
             # Period 2 starts at 2700 on the match clock; no half-time wait in a replay.
-            while time.monotonic() - start_wall < due:
-                time.sleep(min(0.05, due - (time.monotonic() - start_wall)))
+            while True:
+                remaining = due - (time.monotonic() - start_wall)
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
             if a.live_ts:
                 d["ts"] = datetime.now(timezone.utc).isoformat()
             batch.append(d)

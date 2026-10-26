@@ -301,7 +301,7 @@ def play(match_prefix: str, league_path: Optional[str], speed: float, port: int,
             last_clock = ev.clock_s
             due = offset + (ev.clock_s - first_clock) / speed
             while time.monotonic() - start_wall < due:
-                time.sleep(min(0.05, due - (time.monotonic() - start_wall)))
+                time.sleep(max(0.0, min(0.05, due - (time.monotonic() - start_wall))))
             HUB.broadcast("event", ev.to_dict())
             while pending and (pending[0].period < ev.period or (pending[0].period == ev.period and pending[0].t_start_s <= ev.clock_s)):
                 HUB.broadcast("cue", pending[0].to_dict())
