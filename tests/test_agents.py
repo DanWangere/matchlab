@@ -32,8 +32,8 @@ def test_verifier_accepts_record_facts_and_rejects_others(record_and_meta):
     p = round(record["taken"]["p_goal_for"] * 100)
     ok, problems = v.check(f"{name} shot: {p}% chance of a goal within {record['horizon_events']} events. Regret {record['regret']:+.2f}.")
     assert ok, problems
-    ok, problems = v.check(f"{name} has scored 14 goals this season.")
-    assert not ok and any("14" in x for x in problems)
+    ok, problems = v.check(f"{name} has scored 147 goals this season.")
+    assert not ok and any("147" in x for x in problems)
     ok, problems = v.check(f"{name} found Marcus Rashford with a pass.")
     assert not ok and any("Rashford" in x for x in problems)
     # Sentence-initial capitalised words are not names.
@@ -58,8 +58,8 @@ def test_pipeline_falls_back_on_hallucination(record_and_meta):
     cue, ex = pipe.cue(record)
     assert ex.fallback and not any(ex.verified.values())
     assert cue.geometry["text_source"] == "template"
-    assert "14" not in cue.text_analyst["en"]
-    assert any("14" in p for p in ex.problems["en"])
+    assert "147" not in cue.text_analyst["en"]
+    assert any("147" in p for p in ex.problems["en"])
 
 
 def test_pipeline_survives_a_model_outage(record_and_meta):

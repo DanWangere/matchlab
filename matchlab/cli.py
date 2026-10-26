@@ -153,7 +153,8 @@ def cmd_forkd(a: argparse.Namespace) -> int:
     if a.agents != "off":
         from .agents import make_model
         model = make_model(a.agents)
-    outputs = Outputs(hub_url=a.hub, file_path=a.out, ingest=ingest, quiet=a.quiet, cue_min_regret=a.cue_min_regret, model=model, metas=metas)
+    outputs = Outputs(hub_url=a.hub, file_path=a.out, ingest=ingest, quiet=a.quiet, cue_min_regret=a.cue_min_regret, model=model, metas=metas,
+                      sync_agents=a.sync_agents)
     service = ForkService(league, metas, grid, policy, outputs, hub_url=a.hub)
     if a.source == "file":
         if not a.match:
@@ -359,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--follow", action="store_true", help="eventhouse: keep polling for new rows")
     s.add_argument("--agents", choices=["off", "fake", "foundry", "framework"], default="off",
                    help="write the ghost text with the agent team: foundry (OpenAI client on the Foundry endpoint), framework (Microsoft Agent Framework), fake (offline)")
+    s.add_argument("--sync-agents", action="store_true", help="wait for the model before continuing (default: the ghost posts at once with template words and is upgraded in place)")
     s.add_argument("--quiet", action="store_true")
     s.set_defaults(fn=cmd_forkd)
 

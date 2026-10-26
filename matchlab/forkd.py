@@ -215,8 +215,11 @@ class Outputs:
     cue_min_regret: float = 0.03
     model: Any = None                 # a matchlab.agents ModelClient; None keeps template text
     metas: Any = None                 # MetaStore, needed to build a Pipeline per match
+    sync_agents: bool = False         # True: wait for the model before returning (tests, explain)
     _file: Any = None
     _pipelines: dict = field(default_factory=dict)
+    _threads: list = field(default_factory=list)
+    _lock: Any = field(default_factory=threading.Lock)
     sent: int = 0
     posted: int = 0
     verified: int = 0
@@ -236,36 +239,62 @@ class Outputs:
         return self._pipelines[match_id]
 
     def on_fork(self, record: dict[str, Any], cue: Cue) -> None:
+        """Publish the ghost now with template words; if the agents are on, upgrade the same cue in
+        place when the model's words verify. The match never waits for the model."""
         self.sent += 1
+        shown = record["regret"] >= self.cue_min_regret or record["taken"]["type"] == "shot"
+        self._publish(record, cue, first=True, shown=shown)
         pipe = self._pipeline(record["match_id"])
-        if pipe is not None and (record["regret"] >= self.cue_min_regret or record["taken"]["type"] == "shot"):
-            cue, ex = pipe.cue(record)
-            record["explanation"] = {"text": ex.text, "text_analyst": ex.text_analyst, "verified": ex.verified,
-                                     "problems": ex.problems, "model_calls": ex.model_calls, "seconds": ex.seconds}
-            if ex.fallback:
-                self.fallbacks += 1
+        if pipe is not None and shown:
+            def upgrade() -> None:
+                new_cue, ex = pipe.cue(record)
+                record["explanation"] = {"text": ex.text, "text_analyst": ex.text_analyst, "verified": ex.verified,
+                                         "problems": ex.problems, "model_calls": ex.model_calls, "seconds": ex.seconds}
+                if ex.fallback:
+                    self.fallbacks += 1
+                else:
+                    self.verified += 1
+                if not self.quiet:
+                    tag = "verified" if not ex.fallback else f"FALLBACK {ex.problems}"
+                    print(f"         {tag} ({ex.seconds:.1f}s): {new_cue.text['en']}", file=sys.stderr)
+                if any(ex.verified.values()):
+                    new_cue.geometry["update"] = True
+                    self._publish(record, new_cue, first=False, shown=True)
+                self._write_record(record, new_cue)
+            if self.sync_agents:
+                upgrade()
             else:
-                self.verified += 1
-            if not self.quiet:
-                tag = "verified" if not ex.fallback else f"FALLBACK {ex.problems}"
-                print(f"         {tag} ({ex.seconds:.1f}s): {cue.text['en']}", file=sys.stderr)
-        if not self.quiet:
-            t, b = record["taken"], record["best_untaken"]
-            alt = f"{b['type']}{' to ' + b['receiver_name'] if b and b.get('receiver_name') else ''}" if b else "-"
-            print(f"  fork {self.sent:>3}  min {record['minute']:>2}  {record['player_name']:<20} {t['type']:<9} regret {record['regret']:+.3f}  best: {alt:<28} {record.get('fork_ms', 0)} ms", file=sys.stderr)
+                t = threading.Thread(target=upgrade, daemon=True)
+                t.start()
+                self._threads.append(t)
+        else:
+            self._write_record(record, cue)
+
+    def _write_record(self, record: dict[str, Any], cue: Cue) -> None:
         if self._file:
-            self._file.write(json.dumps({"record": record, "cue": cue.to_dict()}, ensure_ascii=False) + "\n")
-            self._file.flush()
-        if self.hub_url and (record["regret"] >= self.cue_min_regret or record["taken"]["type"] == "shot"):
-            self.posted += 1
-            try:
-                HttpSink(self.hub_url.rstrip("/") + "/cues").send([cue.to_dict()])
-            except Exception as e:  # the hub being down must not stop the service
-                print(f"  hub post failed: {e}", file=sys.stderr)
+            with self._lock:
+                self._file.write(json.dumps({"record": record, "cue": cue.to_dict()}, ensure_ascii=False) + "\n")
+                self._file.flush()
         if self.ingest:
             try:
                 row = {k: v for k, v in record.items() if k != "fork_ms"}
                 self.ingest.send("ForkRecords", [row])
+            except Exception as e:
+                print(f"  eventhouse ingest failed: {e}", file=sys.stderr)
+
+    def _publish(self, record: dict[str, Any], cue: Cue, first: bool, shown: bool) -> None:
+        if first and not self.quiet:
+            t, b = record["taken"], record["best_untaken"]
+            alt = f"{b['type']}{' to ' + b['receiver_name'] if b and b.get('receiver_name') else ''}" if b else "-"
+            print(f"  fork {self.sent:>3}  min {record['minute']:>2}  {record['player_name']:<20} {t['type']:<9} regret {record['regret']:+.3f}  best: {alt:<28} {record.get('fork_ms', 0)} ms", file=sys.stderr)
+        if self.hub_url and shown:
+            self.posted += 1
+            try:
+                HttpSink(self.hub_url.rstrip("/") + "/cues").send([cue.to_dict()])
+            except Exception as e:
+                print(f"  hub post failed: {e}", file=sys.stderr)
+        if self.ingest and shown:
+            try:
                 c = cue.to_dict()
                 self.ingest.send("Cues", [{"cue_id": c["cue_id"], "match_id": c["match_id"], "t_start_s": c["t_start_s"], "duration_s": c["duration_s"],
                                            "layer": c["layer"], "geometry": c["geometry"], "text": c["text"], "priority": c["priority"],
@@ -273,7 +302,18 @@ class Outputs:
             except Exception as e:
                 print(f"  eventhouse ingest failed: {e}", file=sys.stderr)
 
+    def wait(self, timeout: float = 60.0) -> None:
+        """Let in-flight model calls finish (end of a match)."""
+        for t in self._threads:
+            t.join(timeout)
+        self._threads = [t for t in self._threads if t.is_alive()]
+        if not self.quiet:
+            t, b = record["taken"], record["best_untaken"]
+            alt = f"{b['type']}{' to ' + b['receiver_name'] if b and b.get('receiver_name') else ''}" if b else "-"
+            print(f"  fork {self.sent:>3}  min {record['minute']:>2}  {record['player_name']:<20} {t['type']:<9} regret {record['regret']:+.3f}  best: {alt:<28} {record.get('fork_ms', 0)} ms", file=sys.stderr)
+
     def close(self) -> None:
+        self.wait()
         if self._file:
             self._file.close()
 

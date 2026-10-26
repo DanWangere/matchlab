@@ -139,3 +139,39 @@ def test_eventhouse_replay_decodes_rows(matches):
     assert [e.event_id for e in got] == [e.event_id for e in events]
     assert got[-1].type == "period_end"
     assert kql.calls == 1
+
+
+def test_fork_service_upgrades_cues_with_agents(league, matches, grid, tmp_path):
+    """With agents on, every shown fork posts twice to the hub: template first, then the same cue_id
+    with verified model words. The record file carries the explanation."""
+    from http.server import ThreadingHTTPServer
+
+    from matchlab.agents import FakeModel
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        HUB.broadcast("reset", None)
+        events, meta = matches[1]
+        data = tmp_path / "data"
+        (data / "matches").mkdir(parents=True)
+        (data / "matches" / f"{meta['match_id']}.meta.json").write_text(json.dumps(meta))
+        metas = MetaStore(str(data))
+        out = Outputs(hub_url=f"http://127.0.0.1:{port}", file_path=str(tmp_path / "forks.jsonl"), quiet=True, cue_min_regret=-1.0,
+                      model=FakeModel(), metas=metas, sync_agents=True)
+        svc = ForkService(league, metas, grid, ForkPolicy(rollouts=6, horizon=6, max_per_match=3), out, hub_url=f"http://127.0.0.1:{port}")
+        svc.run(iter(events))
+        out.close()
+        assert out.verified == 3 and out.fallbacks == 0
+        ghosts = [c for c in HUB.cues if c["layer"] == "ghost"]
+        assert len(ghosts) == 6, "template post plus upgrade post per fork"
+        ids = {c["cue_id"] for c in ghosts}
+        assert len(ids) == 3
+        upgraded = [c for c in ghosts if c["geometry"].get("update")]
+        assert len(upgraded) == 3 and all(c["geometry"]["text_source"] == "model" for c in upgraded)
+        rows = [json.loads(l) for l in (tmp_path / "forks.jsonl").read_text().splitlines()]
+        assert len(rows) == 3 and all("explanation" in r["record"] for r in rows)
+        assert all(r["record"]["explanation"]["verified"]["fr"] for r in rows)
+    finally:
+        server.shutdown()

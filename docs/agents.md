@@ -34,10 +34,20 @@ python evals/groundedness.py --records runs/forks.jsonl --foundry --upload   # s
 `/openai/v1` endpoint; `--agents fake` needs no network and is what the tests use. All three go
 through the same Verifier.
 
-Latency: two model calls per shown fork (Explainer, Localiser). On the live path the ghost cue is
-posted after both return, so a slow model delays the ghost, never the match; the Verifier is
-microseconds. If the model takes longer than the window a ghost is useful in, run forkd with
-`--agents off` for the live screen and `matchlab recap` for the full-time story.
+Latency: the first live run measured 8.9 s for two sequential calls on gpt-5.6-sol, too slow for a
+ghost that should appear before the next phase of play. So the live path does two things: Explainer
+and Localiser are one structured call (all three languages in one response), and the ghost is
+posted at once with template words, then re-posted with the same `cue_id` and the model's words
+once they verify; the renderer updates the cue in place and marks model-written text with a small
+diamond. The match never waits for the model. `--sync-agents` restores the blocking behaviour for
+tests and for `matchlab explain`.
+
+What the first live run taught the Verifier: the model rounded 0.625 to 63% where the template
+said 62%, and wrote the regret as -59 (hundredths) where the template said -0.59. Both are honest
+readings of the record, so the Verifier now accepts the half-up and truncated percent, the regret
+in hundredths or decimal with either sign, a comma decimal and a Unicode minus, and the record
+carries pre-rendered `goal_chance` and `regret_text` fields for the model to copy. A number that
+is not in the record in any of those forms still fails.
 
 ## Evaluation
 

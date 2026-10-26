@@ -101,6 +101,12 @@ class FakeModel:
     def complete(self, system: str, user: str, json_schema: Optional[dict[str, Any]] = None) -> str:
         self.calls += 1
         payload = json.loads(user[user.index("{"):]) if "{" in user else {}
+        if "explainer+localiser" in system:
+            r = payload
+            inner = json.loads(self.complete("explainer\n", user))
+            if self.hallucinate:
+                inner["analyst"] += " He has scored 147 goals this season."
+            return json.dumps({"en": inner, "fr": {k: _pseudo_translate(v, "fr") for k, v in inner.items()}, "es": {k: _pseudo_translate(v, "es") for k, v in inner.items()}})
         if "explainer" in system:
             r = payload
             t, b = r["taken"], r.get("best_untaken")
@@ -112,8 +118,8 @@ class FakeModel:
             else:
                 casual = f"{name} {took}, and it was the right call."
                 analyst = f"{name} {took}: {round(t['p_goal_for'] * 100)}% chance of a goal within {r['horizon_events']} events, the best of {len(r['candidates'])} options."
-            if self.hallucinate:
-                analyst += " He has scored 14 goals this season."
+            if self.hallucinate and "explainer+localiser" not in system:
+                analyst += " He has scored 147 goals this season."
             return json.dumps({"casual": casual, "analyst": analyst})
         if "localiser" in system:
             src = payload
@@ -193,6 +199,17 @@ that mattered most, in match order. Write a recap of at most 120 words in Englis
 records; never invent context."""
 
 EXPLAIN_SCHEMA = {"type": "object", "properties": {"casual": {"type": "string"}, "analyst": {"type": "string"}}, "required": ["casual", "analyst"]}
+EXPLAIN_ALL_SYSTEM = """You are the explainer and localiser on a live football broadcast. You receive one fork record: a decision a player made,
+the alternatives the counterfactual engine evaluated, and for each option the chance it led to a goal within a short horizon.
+Return JSON: {"en": {"casual": ..., "analyst": ...}, "fr": {...}, "es": {...}}.
+- casual: one plain sentence a fan understands at a glance, no numbers, at most 20 words.
+- analyst: one sentence quoting the taken option's goal_chance, the best untaken option's goal_chance, and regret_text, exactly as given.
+- fr and es: natural broadcast French and Spanish of the same two sentences; keep names, percentages and regret_text exactly as given.
+Rules: use only names and numbers present in the record, copied verbatim (goal_chance and regret_text are already formatted);
+never invent history, form, injuries or anything not in the record; if regret is below 0.03 say the player made the right call."""
+EXPLAIN_ALL_SCHEMA = {"type": "object",
+                      "properties": {lang: {"type": "object", "properties": {"casual": {"type": "string"}, "analyst": {"type": "string"}}, "required": ["casual", "analyst"]} for lang in ("en", "fr", "es")},
+                      "required": ["en", "fr", "es"]}
 LOCALISE_SCHEMA = {"type": "object", "properties": {"fr": {"type": "object"}, "es": {"type": "object"}}, "required": ["fr", "es"]}
 RECAP_SCHEMA = {"type": "object", "properties": {"en": {"type": "string"}, "fr": {"type": "string"}, "es": {"type": "string"}}, "required": ["en", "fr", "es"]}
 
@@ -208,7 +225,18 @@ def _slim(record: dict[str, Any]) -> dict[str, Any]:
     r["taken"] = act(record["taken"])
     r["best_untaken"] = act(record.get("best_untaken"))
     r["candidates"] = [act(c) for c in record["candidates"]]
+    # Pre-rendered forms, so the model quotes exactly what the Verifier will accept.
+    for a in [r["taken"], r["best_untaken"]] + r["candidates"]:
+        if a and a.get("p_goal_for") is not None:
+            a["goal_chance"] = f"{pct(a['p_goal_for'])}%"
+    r["regret_text"] = f"{record['regret']:+.2f}"
     return r
+
+
+def pct(p: float) -> int:
+    """Whole percent, half up: 0.625 -> 63, 0.624 -> 62. The Verifier accepts both this and the
+    truncated form, since a model may round either way."""
+    return int(p * 100 + 0.5)
 
 
 class Verifier:
@@ -228,18 +256,35 @@ class Verifier:
         self.names = names
         self.allowed_numbers: set[str] = set()
         r = record
+        def add_prob(p: float) -> None:
+            x = p * 100
+            for cand in (int(x + 0.5), int(x), round(x), int(x + 0.5) + 1):
+                self.allowed_numbers.add(str(cand))
+            self.allowed_numbers.add(f"{x:.1f}")
+
+        def add_signed(v: float) -> None:
+            for f in (f"{v:.2f}", f"{v:.3f}", f"{v:.1f}", f"{abs(v):.2f}", f"{abs(v):.3f}", f"{abs(v):.1f}"):
+                self.allowed_numbers.add(f)
+                self.allowed_numbers.add(f.lstrip("+"))
+            # The same value in hundredths or as a percentage ("-59", "59", "59%").
+            for cand in (int(abs(v) * 100 + 0.5), int(abs(v) * 100), int(abs(v) * 100 + 0.5) + 1):
+                self.allowed_numbers.add(str(cand))
+
         for a in [r["taken"], r.get("best_untaken")] + list(r["candidates"]):
             if not a:
                 continue
             for k in ("p_goal_for", "p_goal_against"):
                 if k in a and a[k] is not None:
-                    self.allowed_numbers.add(str(round(a[k] * 100)))
+                    add_prob(a[k])
             if a.get("value") is not None:
-                self.allowed_numbers.add(f"{a['value']:.2f}")
-                self.allowed_numbers.add(f"{a['value']:.3f}")
-        for v in (r.get("regret"), ):
-            if v is not None:
-                self.allowed_numbers.update({f"{v:.2f}", f"{v:.3f}", f"{abs(v):.2f}", f"{abs(v):.3f}", f"{abs(v):.1f}"})
+                add_signed(a["value"])
+            if a.get("xg_for") is not None:
+                add_signed(a["xg_for"])
+        if r.get("regret") is not None:
+            add_signed(r["regret"])
+            # The regret as a difference of the two probabilities, which a model may also quote.
+            if r.get("best_untaken") and r["best_untaken"].get("p_goal_for") is not None and r["taken"].get("p_goal_for") is not None:
+                add_prob(abs(r["best_untaken"]["p_goal_for"] - r["taken"]["p_goal_for"]))
         for v in (r.get("minute"), r.get("horizon_events"), r.get("rollouts"), len(r["candidates"]), r["score"]["home"], r["score"]["away"]):
             self.allowed_numbers.add(str(v))
         self.allowed_names: set[str] = set()
@@ -253,8 +298,13 @@ class Verifier:
         problems = []
         for m in self.NUM.findall(text):
             num = m.replace(",", ".")
-            if num.lstrip("-+") not in self.allowed_numbers and num not in self.allowed_numbers:
-                problems.append(f"number {m} not in record")
+            bare = num.lstrip("-+")
+            if bare in self.allowed_numbers or num in self.allowed_numbers:
+                continue
+            # "0.59" and ".59" and "59" (hundredths) are the same regret.
+            if bare.startswith("0.") and bare[2:] in self.allowed_numbers:
+                continue
+            problems.append(f"number {m} not in record")
         for w in self.WORD.findall(text):
             if w in self.STOP or w in self.allowed_names:
                 continue
@@ -283,27 +333,33 @@ class Pipeline:
     """Explainer -> Localiser -> Verifier, producing a cue whose words came from the model when they
     passed and from the template when they did not."""
 
-    def __init__(self, model: ModelClient, meta: dict[str, Any], languages: tuple[str, ...] = LANGS):
+    def __init__(self, model: ModelClient, meta: dict[str, Any], languages: tuple[str, ...] = LANGS, single_call: bool = True):
         self.model = model
         self.meta = meta
         self.names = Names(meta)
         self.languages = languages
+        self.single_call = single_call
 
     def explain(self, record: dict[str, Any]) -> Explained:
         t0 = time.perf_counter()
         slim = _slim(record)
         calls0 = getattr(self.model, "calls", 0)
-        out = json.loads(self.model.complete("explainer\n" + EXPLAINER_SYSTEM, "Fork record:\n" + json.dumps(slim, ensure_ascii=False), EXPLAIN_SCHEMA))
-        casual, analyst = str(out.get("casual", "")), str(out.get("analyst", ""))
-        loc = json.loads(self.model.complete("localiser\n" + LOCALISER_SYSTEM, "Sentences:\n" + json.dumps({"casual": casual, "analyst": analyst}, ensure_ascii=False), LOCALISE_SCHEMA))
-        text = {"en": casual}
-        text_a = {"en": analyst}
-        for lang in self.languages:
-            if lang == "en":
-                continue
-            block = loc.get(lang, {}) or {}
-            text[lang] = str(block.get("casual", ""))
-            text_a[lang] = str(block.get("analyst", ""))
+        if self.single_call:
+            out = json.loads(self.model.complete("explainer+localiser\n" + EXPLAIN_ALL_SYSTEM, "Fork record:\n" + json.dumps(slim, ensure_ascii=False), EXPLAIN_ALL_SCHEMA))
+            text = {lang: str((out.get(lang) or {}).get("casual", "")) for lang in self.languages}
+            text_a = {lang: str((out.get(lang) or {}).get("analyst", "")) for lang in self.languages}
+        else:
+            out = json.loads(self.model.complete("explainer\n" + EXPLAINER_SYSTEM, "Fork record:\n" + json.dumps(slim, ensure_ascii=False), EXPLAIN_SCHEMA))
+            casual, analyst = str(out.get("casual", "")), str(out.get("analyst", ""))
+            loc = json.loads(self.model.complete("localiser\n" + LOCALISER_SYSTEM, "Sentences:\n" + json.dumps({"casual": casual, "analyst": analyst}, ensure_ascii=False), LOCALISE_SCHEMA))
+            text = {"en": casual}
+            text_a = {"en": analyst}
+            for lang in self.languages:
+                if lang == "en":
+                    continue
+                block = loc.get(lang, {}) or {}
+                text[lang] = str(block.get("casual", ""))
+                text_a[lang] = str(block.get("analyst", ""))
         v = Verifier(record, self.names)
         verified, problems = {}, {}
         for lang in self.languages:

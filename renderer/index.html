@@ -81,6 +81,7 @@
   .cue.home { border-left-color: var(--home); } .cue.away { border-left-color: var(--away); }
   .cue.ghost { border-left-color: var(--ghost); background: #2b2638; }
   .cue .when { color: var(--muted); font-family: var(--cond); font-weight: 700; margin-right: 6px; }
+  .cue .src { color: var(--ghost); font-size: 10px; margin-left: 4px; }
   .cue .alts { margin: 6px 0 0; padding: 0; list-style: none; font-size: 12.5px; color: var(--muted); }
   .cue .alts li { display: flex; justify-content: space-between; gap: 8px; }
   .cue .alts li.taken { color: var(--text); }
@@ -331,6 +332,13 @@
   function onCue(c) {
     if (c.layer === "dial") { S.dial = c; renderMomentum(); return; }
     if (!cueVisible(c)) return;
+    const existing = S.cues.find((x) => x.cue_id === c.cue_id);
+    if (existing) {  // the same cue again: the agents upgraded its words. Keep its place and clock.
+      existing.text = c.text; existing.text_analyst = c.text_analyst; existing.geometry = { ...existing.geometry, ...c.geometry };
+      existing._until = Math.max(existing._until, Date.now() + 6000);
+      if (c.layer === "lower_third") showLower(existing);
+      renderCues(); return;
+    }
     c._until = Date.now() + Math.max(3, Math.min(12, c.duration_s)) * 1000;
     S.cues.unshift(c); S.cues.length = Math.min(S.cues.length, 5);
     if (c.layer === "lower_third") showLower(c);
@@ -354,7 +362,8 @@
         const best = c.geometry.candidates.filter((x) => !x.taken).sort((a, b) => b.value - a.value)[0];
         alts = `<ul class="alts">` + c.geometry.candidates.map((x) => `<li class="${x.taken ? "taken" : (x === best ? "best" : "")}"><span>${esc(x.type === "pass" ? (x.subtype + " → " + (S.names[x.receiver] || "")) : x.type)}${x.taken ? " ✓" : ""}</span><span>${Math.round(x.p_goal_for * 100)}%</span></li>`).join("") + `</ul>`;
       }
-      return `<div class="cue ${c.layer === "ghost" ? "ghost" : side}"><span class="when">${minute(c.t_start_s)}'</span>${esc(cueText(c))}${alts}</div>`;
+      const src = c.geometry && c.geometry.text_source === "model" ? ` <span class="src" title="written by the agent team, verified against the record">◆</span>` : "";
+      return `<div class="cue ${c.layer === "ghost" ? "ghost" : side}"><span class="when">${minute(c.t_start_s)}'</span>${esc(cueText(c))}${src}${alts}</div>`;
     }).join("");
   }
   setInterval(renderCues, 1000);
