@@ -22,3 +22,4 @@ param agents = 'foundry'
 // Secrets come from the environment:  export HUB_KEY=... EVENTHUB_CONNECTION_STRING=...  (the destination's string)
 param hubKey = readEnvironmentVariable('HUB_KEY', '')
 param eventHubConnectionString = readEnvironmentVariable('EVENTHUB_READ_CONNECTION_STRING', '')
+param foundryApiKey = readEnvironmentVariable('FOUNDRY_API_KEY', '')   // only if the identity cannot be given the Azure AI User role

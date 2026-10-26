@@ -80,6 +80,10 @@ param foundryModelEndpoint string = ''
 @description('Foundry model deployment name.')
 param foundryDeployment string = 'gpt-5.6-sol'
 
+@description('Foundry project API key, used instead of the identity when no one can grant it the Azure AI User role. Empty uses the identity.')
+@secure()
+param foundryApiKey string = ''
+
 @description('Name of the Foundry (AI Services) account the identity needs the Azure AI User role on; empty skips the role assignment.')
 param foundryAccountName string = ''
 
@@ -261,11 +265,13 @@ var forkdArgs = concat(
 var forkdSecrets = concat(
   [{ name: 'hub-key', value: hubKey }],
   empty(eventHubConnectionString) ? [] : [{ name: 'eventhub-cs', value: eventHubConnectionString }],
+  empty(foundryApiKey) ? [] : [{ name: 'foundry-key', value: foundryApiKey }],
   registrySecrets
 )
 var forkdEnv = concat(
   [{ name: 'MATCHLAB_HUB_KEY', secretRef: 'hub-key' }],
-  empty(eventHubConnectionString) ? [] : [{ name: 'EVENTHUB_CONNECTION_STRING', secretRef: 'eventhub-cs' }]
+  empty(eventHubConnectionString) ? [] : [{ name: 'EVENTHUB_CONNECTION_STRING', secretRef: 'eventhub-cs' }],
+  empty(foundryApiKey) ? [] : [{ name: 'FOUNDRY_API_KEY', secretRef: 'foundry-key' }]
 )
 
 // The fork service runs as a job: one execution per match, exiting at full time, billed only while it runs.

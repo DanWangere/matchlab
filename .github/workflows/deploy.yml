@@ -3,7 +3,7 @@
 #
 #   secrets:   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
 #              MATCHLAB_HUB_KEY, EVENTHUB_CONNECTION_STRING, EVENTHUB_NAME (the custom endpoint destination forkd reads),
-#              KUSTO_QUERY_URI, KUSTO_INGEST_URI (optional),
+#              KUSTO_QUERY_URI, KUSTO_INGEST_URI (optional), FOUNDRY_API_KEY (optional, when the identity cannot get the Azure AI User role),
 #              GHCR_PULL_TOKEN (optional: a token with read:packages, only if the image package stays private)
 #   variables: AZURE_RESOURCE_GROUP, AZURE_LOCATION, FOUNDRY_MODEL_ENDPOINT, FOUNDRY_DEPLOYMENT,
 #              FOUNDRY_ACCOUNT_NAME, FOUNDRY_RESOURCE_GROUP (optional), COSMOS_ACCOUNT_NAME, COSMOS_RESOURCE_GROUP (optional),
@@ -117,6 +117,7 @@ jobs:
                kustoIngestUri="${{ secrets.KUSTO_INGEST_URI }}" \
                foundryModelEndpoint="${{ vars.FOUNDRY_MODEL_ENDPOINT }}" \
                foundryDeployment="${{ vars.FOUNDRY_DEPLOYMENT || 'gpt-5.6-sol' }}" \
+               foundryApiKey="${{ secrets.FOUNDRY_API_KEY }}" \
                foundryAccountName="${{ vars.FOUNDRY_ACCOUNT_NAME }}" \
                foundryResourceGroup="${{ vars.FOUNDRY_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP || 'rg-matchlab' }}" \
                cosmosAccountName="${{ vars.COSMOS_ACCOUNT_NAME }}" \

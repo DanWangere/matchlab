@@ -64,13 +64,35 @@ the hub offers `GET /matches` and `POST /replay/<match_id>?speed=10`; the overla
 A replay never starts over a live match unless `force=1` is passed. `COSMOS_KEY` is accepted instead
 of a role, for an emulator or a throwaway account.
 
+## Two ways to deploy
+
+- **From GitHub Actions** (`deploy` workflow): needs an identity GitHub can sign in as, with
+  federated credentials. In a tenant where your user may not create app registrations, a
+  user-assigned managed identity works the same way and needs only Contributor on the resource
+  group to create:
+  ```bash
+  az identity create -n id-matchlab-deploy -g <rg> -o none
+  az identity federated-credential create --identity-name id-matchlab-deploy -g <rg> --name github-main \
+    --issuer https://token.actions.githubusercontent.com --subject repo:<owner>/matchlab:ref:refs/heads/main \
+    --audiences api://AzureADTokenExchange
+  PRINCIPAL=$(az identity show -n id-matchlab-deploy -g <rg> --query principalId -o tsv)
+  az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal --role Contributor --scope $(az group show -n <rg> --query id -o tsv)
+  az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal --role "User Access Administrator" --scope $(az group show -n <rg> --query id -o tsv)
+  az identity show -n id-matchlab-deploy -g <rg> --query "{AZURE_CLIENT_ID:clientId, AZURE_TENANT_ID:tenantId}" -o yaml
+  ```
+  The two role assignments need Owner or User Access Administrator on the group; if they fail with
+  `AuthorizationFailed`, use the second way.
+- **From a laptop**: the `image` workflow builds and pushes the image on every push to `main`
+  (no Azure identity involved), and `az deployment group create` with your own login does the rest.
+  The template's own role assignments (Foundry, Cosmos DB) need the same rights; when the Foundry one
+  is refused, leave `foundryAccountName` empty and pass the project's API key as `foundryApiKey`
+  (`FOUNDRY_API_KEY`), which the fork job then uses instead of its identity.
+
 ## Deploy from GitHub Actions
 
-1. **OIDC.** Create an app registration (or a user-assigned identity) with a federated credential
-   for this repository (`repo:<owner>/matchlab:ref:refs/heads/main`, or the branch you run from) and
-   give it Contributor and User Access Administrator on the resource group; the template assigns the
-   registry, Foundry and Cosmos DB roles itself, so it also needs Contributor on the groups holding
-   the Foundry account and the Cosmos DB account when those differ.
+1. **OIDC.** The identity above, with Contributor and User Access Administrator on the resource
+   group; the template assigns the registry, Foundry and Cosmos DB roles itself, so it also needs
+   Contributor on the groups holding the Foundry account and the Cosmos DB account when those differ.
 2. **Repository secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
    `MATCHLAB_HUB_KEY` (any long random string), `EVENTHUB_CONNECTION_STRING` and `EVENTHUB_NAME`
    (from the Eventstream custom endpoint **destination** `matchlab-out`; the fork service reads the
@@ -120,16 +142,21 @@ replay picker.
 
 ## Deploy from a laptop
 
-With a public image already on ghcr.io (the workflow's, or your own `docker push`):
+With the image on ghcr.io (pushed by the `image` workflow and made public once, or your own
+`docker push`), `infra/main.bicepparam` filled in (`imageRef`, the account names) and the secrets in
+the shell (`.env` already has `EVENTHUB_READ_CONNECTION_STRING`):
 
 ```bash
-export HUB_KEY=$(openssl rand -hex 24) EVENTHUB_READ_CONNECTION_STRING='...'
+source .env
+export HUB_KEY=$(openssl rand -hex 24)                                   # keep it: forkd on the laptop needs MATCHLAB_HUB_KEY=$HUB_KEY to post
 az bicep build -f infra/main.bicep                                       # checks the template
 az deployment group create -g rg-ai-garage-global -f infra/main.bicep -p infra/main.bicepparam
-az deployment group show -g rg-ai-garage-global -n main --query properties.outputs.hubUrl.value -o tsv
+az deployment group show -g rg-ai-garage-global -n main --query properties.outputs -o yaml
 ```
 
-`infra/main.bicepparam` holds the non-secret values; edit `imageRef` and the account names first.
+Then `az containerapp job start -n matchlab-forkd -g rg-ai-garage-global` before a match and
+stream from the laptop as usual. Re-running the same `az deployment group create` with a new
+`imageRef` is the whole upgrade path.
 
 ## Run the image locally
 

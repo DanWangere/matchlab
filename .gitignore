@@ -9,3 +9,4 @@ data/
 runs/
 evals/_rows.jsonl
 evals/last_run.json
+infra/*.json

@@ -37,16 +37,26 @@ class ModelClient(Protocol):
     def complete(self, system: str, user: str, json_schema: Optional[dict[str, Any]] = None) -> str: ...
 
 
+def foundry_api_key(credential: Any = None) -> Any:
+    """What the OpenAI client signs requests with: an Entra ID token provider (az login, a managed
+    identity, or the credential given), or the project's API key when FOUNDRY_API_KEY is set, for an
+    environment where no identity can be given the Azure AI User role."""
+    key = os.environ.get("FOUNDRY_API_KEY")
+    if key and credential is None:
+        return key
+    from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+
+    return get_bearer_token_provider(credential or DefaultAzureCredential(), TOKEN_SCOPE)
+
+
 class FoundryModel:
     """Chat completions on the Foundry project's OpenAI-compatible endpoint, Entra ID auth."""
 
     def __init__(self, endpoint: str = MODEL_ENDPOINT, deployment: str = DEPLOYMENT, credential: Any = None):
-        from azure.identity import DefaultAzureCredential, get_bearer_token_provider
         from openai import OpenAI
 
         self.deployment = deployment
-        self.token = get_bearer_token_provider(credential or DefaultAzureCredential(), TOKEN_SCOPE)
-        self.client = OpenAI(base_url=endpoint, api_key=self.token)
+        self.client = OpenAI(base_url=endpoint, api_key=foundry_api_key(credential))
         self.calls = 0
         self.seconds = 0.0
 
@@ -71,12 +81,10 @@ class AgentFrameworkModel:
 
         from agent_framework import Agent
         from agent_framework.openai import OpenAIChatClient
-        from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
         self._asyncio = asyncio
         self._Agent = Agent
-        token = get_bearer_token_provider(credential or DefaultAzureCredential(), TOKEN_SCOPE)
-        self.client = OpenAIChatClient(deployment, base_url=endpoint, api_key=token)
+        self.client = OpenAIChatClient(deployment, base_url=endpoint, api_key=foundry_api_key(credential))
         self.calls = 0
         self.seconds = 0.0
 
