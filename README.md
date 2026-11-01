@@ -240,5 +240,4 @@ team's attack frame (towards x = 105); a renderer flips the away team's events.
 Built and run end to end: generator, stream into Fabric (Eventstream, Eventhouse, dashboard),
 the fork service on a live Event Hub and on Eventhouse replay, the overlay with ghosts, the agent
 team on gpt-5.6-sol through the Foundry project with verification and evaluation, replay from Cosmos
-DB, Container Apps deployment. Deferred: **Undertow**, the hidden-state estimator with a pre-match assumption ledger,
-whose training data (the truth files) and KQL feature functions are already here.
+DB, Container Apps deployment.
