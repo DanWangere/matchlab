@@ -62,9 +62,6 @@ functions) and the studio dashboard; fork records and cues are written back to t
                                                                                                  └──────────────┘
 ```
 
-The hidden ground truth of the simulator (momentum, fatigue, press intent, risk appetite per team per
-minute, and every instruction change with its cause) is never streamed; it is exported to the
-Lakehouse for the second engine, Undertow, which is designed but not built in this entry.
 
 ## Run it
 
